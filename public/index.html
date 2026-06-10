@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dreamcore Spa</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #vr-button {
+      position: fixed; bottom: 28px; left: 50%;
+      transform: translateX(-50%);
+      padding: 14px 36px;
+      background: rgba(107, 72, 200, 0.85);
+      color: #fff; border: none; border-radius: 28px;
+      font-size: 1rem; letter-spacing: 0.06em;
+      cursor: pointer; z-index: 10;
+      backdrop-filter: blur(8px);
+    }
+    #vr-button:disabled { opacity: 0.4; cursor: default; }
+  </style>
+</head>
+<body>
+  <button id="vr-button" disabled>Loading…</button>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.178.0/examples/jsm/",
+      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/0.1.9/spark.module.js"
+    }
+  }
+  </script>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
