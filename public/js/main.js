@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { SplatMesh } from "@sparkjsdev/spark";
 import { setupEffects } from "./effects.js";
+import { createGlowDust } from "./glow.js";
 import { SessionTimeline } from "./session.js";
 import { AudioManager } from "./audio.js";
 
@@ -20,7 +21,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050510);
 
 const camera = new THREE.PerspectiveCamera(
-  70, window.innerWidth / window.innerHeight, 0.05, 100
+  70, window.innerWidth / window.innerHeight, 0.05, 1000
 );
 
 // The rig is the object we move to reposition the user in the world.
@@ -35,22 +36,24 @@ scene.add(rig);
 const DESKTOP_EYE_HEIGHT = 1.6;
 rig.position.y = DESKTOP_EYE_HEIGHT;
 renderer.xr.addEventListener("sessionstart", () => { rig.position.y = 0; });
-renderer.xr.addEventListener("sessionend",   () => { rig.position.y = DESKTOP_EYE_HEIGHT; });
+renderer.xr.addEventListener("sessionend", () => { rig.position.y = DESKTOP_EYE_HEIGHT; });
 
 // ---------- Splat ----------
-const splat = new SplatMesh({ url: "./resources/worlds/env_1.spz" });
+const splat = new SplatMesh({ url: "./resources/worlds/env_3.spz" });
 splat.position.y = 0.4;
 splat.rotation.y = 0;
 scene.add(splat);
 
 // ---------- Modules ----------
-const audio    = new AudioManager();
-const effects  = setupEffects(splat);
+const audio = new AudioManager();
+const effects = setupEffects(splat);
+window._fx = effects;              // live tuning: _fx.uniforms.uScale.value = 1.7
+const dust = createGlowDust(scene);
 const timeline = new SessionTimeline({ scene, camera, splat, audio, effects });
 
 // ---------- Reusable movement vectors — module scope, never allocated per frame ----------
 const _forward = new THREE.Vector3();
-const _right   = new THREE.Vector3();
+const _right = new THREE.Vector3();
 const _worldUp = new THREE.Vector3(0, 1, 0);
 
 // ---------- DEBUG: first-person controls (desktop only) ----------
@@ -96,9 +99,9 @@ if (DEBUG) {
   // X-axis offset removed: WASD walking covers horizontal placement.
   window.addEventListener("keydown", (e) => {
     if (renderer.xr.isPresenting) return;
-    if (e.key === "ArrowUp")    splat.position.y -= 0.1;
-    else if (e.key === "ArrowDown")  splat.position.y += 0.1;
-    else if (e.key === "ArrowLeft")  splat.rotation.y -= Math.PI / 12;
+    if (e.key === "ArrowUp") splat.position.y -= 0.1;
+    else if (e.key === "ArrowDown") splat.position.y += 0.1;
+    else if (e.key === "ArrowLeft") splat.rotation.y -= Math.PI / 12;
     else if (e.key === "ArrowRight") splat.rotation.y += Math.PI / 12;
     else return;
   });
@@ -123,7 +126,7 @@ const btn = document.getElementById("vr-button");
 // false so the button always enables rather than silently throwing.
 (navigator.xr?.isSessionSupported("immersive-vr") ?? Promise.resolve(false))
   .then(async (ok) => {
-    btn.disabled    = false;
+    btn.disabled = false;
     btn.textContent = ok ? "Enter the Space" : "Experience in Browser";
 
     btn.onclick = async () => {
@@ -148,7 +151,7 @@ const btn = document.getElementById("vr-button");
 const clock = new THREE.Clock();
 
 renderer.setAnimationLoop(() => {
-  const dt      = clock.getDelta();
+  const dt = clock.getDelta();
   const elapsed = clock.getElapsedTime();
 
   // First-person rig movement — desktop only.
@@ -162,13 +165,14 @@ renderer.setAnimationLoop(() => {
     _right.crossVectors(_forward, _worldUp).normalize();
 
     const speed = 3.0;  // m/s
-    if (keys.has("w")) rig.position.addScaledVector(_forward,  speed * dt);
+    if (keys.has("w")) rig.position.addScaledVector(_forward, speed * dt);
     if (keys.has("s")) rig.position.addScaledVector(_forward, -speed * dt);
-    if (keys.has("a")) rig.position.addScaledVector(_right,   -speed * dt);
-    if (keys.has("d")) rig.position.addScaledVector(_right,    speed * dt);
+    if (keys.has("a")) rig.position.addScaledVector(_right, -speed * dt);
+    if (keys.has("d")) rig.position.addScaledVector(_right, speed * dt);
   }
 
   effects.update(elapsed);
+  dust.update(elapsed, 0);
   timeline.update(dt);
 
   // SparkRenderer is auto-created by Spark on the first render call and handles
