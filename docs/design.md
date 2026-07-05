@@ -1,1217 +1,527 @@
-# AI Dreamcore VR Spa — Spark + Three.js + WebXR 实现方案（学习版）
+# One's Own Room — Spark + Three.js + WebXR 实现方案
 
-> 这一版替换之前的 A-Frame 方案。技术栈：Three.js（场景与 WebXR）+ Spark（高斯泼溅渲染与 dyno shader）+ Marble（环境生成）+ Claude / ElevenLabs（个性化语音）。
+> 一个属于自己的房间。技术栈：Three.js（场景与 WebXR）+ Spark（高斯泼溅渲染与 dyno shader）+ Marble（环境生成）+ Claude / ElevenLabs（个性化语音）。
 >
-> 文档定位：既是实现方案，也是学习材料。每段代码后面都有「这段在做什么」的解释，所有借鉴别人思路的地方都用 📌 标注出处。
+> 文档定位：既是实现方案，也是学习材料。关键段落后面有「这段在做什么」的解释，借鉴别人思路的地方用 📌 标注出处。
 >
-> **本版更新（悬浮球交互 + 事件驱动显形）：** 心情输入从「进场前的填表页」搬进体验本身——进场后面对一颗金属悬浮球说出（或在门槛层打字）你的心情，球收下、凝思，世界随之绕球球面波显形，球化成场景中心的半透明白光，个性化语音随之响起。最深的结构性后果：**显形不再由时间轴驱动，而 gate 在「AI 响应 ready」事件上。** 新增 `orb.js`（悬浮球）和 `voice.js`（语音输入）两个子系统，`session.js` 从时间轴改为状态机，入口从独立 onboarding 页改为 index.html 内的门槛 overlay。受影响章节：项目结构、Step 1、Step 4–8、Marble、性能/坑清单、分阶段计划。
+> **每节标了状态**：【已实现】= 已做完并跑通（文档按实际实现回填）；【重构】= 已有代码要按新概念改；【待建】= 还没写，本文给设计与代码草图。
 
 ---
 
-## 0. 借鉴标注总说明（先读这个）
+## 0. 立意：为什么叫 One's Own Room
 
-本方案中所有代码都是为你的项目**重新写的**，没有复制 cocolinux0101/dreamcore-experiment 仓库的代码。但有三处**思路层面的借鉴**，在正文里会再次标注：
+名字接的是 Virginia Woolf 的 *A Room of One's Own*：人需要一个属于自己的、不被打扰的空间，才能有内在生活。放到 emotional safe zone 语境里，这个房间是一个**你不欠任何人任何东西的自治空间**。
 
-| 编号 | 借鉴内容 | 来源 | 借鉴的是什么 / 我们改了什么 |
+这条立意是所有交互决策的统一准绳。整个体验被设计成**一连串「你可以少给一点」的选项**：
+
+- 名字**可以不给**（门槛层有明确的「I don't need a name here」）。
+- 心情**可以不说**（「not today」跳过，她的欢迎不带 context，仍然成立）。
+- 话**可以不说**（进房后她在，但你不去触碰悬浮球，就是独处）。
+- 陪伴**可以不要**（不理球，她不会打扰你）。
+
+所以本方案通篇不用「疗愈 spa」「meditation guide」这类框架——那会把房间变成一个「对你做点什么」的服务。这里相反：房间不对你做任何事，它只是**在场**，一切由居住者决定。那个声音不是治疗师、不是助手，她像是房间本身有了一点温柔的意识，注意到你进来了（persona 见 Step 10）。
+
+> 与 kagami→kami 那套去自我中心哲学的呼应：空间不是被展示给你，而是**因你的输入而显现**（Step 6 显形入场把这一点做成了字面事实）。
+
+---
+
+## 1. Demo 范围（当前开发目标）
+
+Demo 只有两个界面，其余一律推后：
+
+**界面 1 · 门槛层（threshold）**：title + 悬浮球在场 → 她用预录语音欢迎并引导（"Welcome to One's Own Room — also, your own room."）→ 问名字（可无名）→ valence×arousal 量表（**照测照记，暂不驱动视觉**）→ 心情描述（**按住球口述**为默认；可「not today」跳过；可键盘）→ Enter → 进入房间。
+
+**界面 2 · 房间**：现有管线原样跑（心情 → 开场白生成 → ready 点燃显形 → 开场白落下）+ **长按球回合制对话**。房间视觉参数不随情绪变。
+
+**明确推后 / 删除的**：
+
+| 项 | 处置 |
+|----|------|
+| 空间呼吸 | **整体删除**（不再是本项目的一部分；effects.js 的 uBreath stub 与 glow.js 的 breath 参数列入清理项） |
+| valence/arousal → 环境参数（冷暖/明暗/动态） | **推后**。量表照测、数据照记、随请求发给 AI；但不驱动任何 uniform。框架保留（Step 5.5），后期接上时数据链路已通，只补 shader 侧 |
+| 进房后的键盘小菜单 roomMenu.js | demo 后 |
+| meet-and-lead（房间随会话把人往平静带） | future work / 第二个 study 的 RQ |
+| full realtime 多轮语音 | 明确的 future work（Step 9 降级链） |
+
+---
+
+## 2. 借鉴标注
+
+本方案所有代码都是为项目**重新写的**，没有复制 cocolinux0101/dreamcore-experiment 仓库的代码。两处**思路层面**的借鉴：
+
+| 编号 | 借鉴内容 | 来源 | 借鉴的是什么 / 改了什么 |
 |------|---------|------|---------------------------|
-| 📌A | 用 Spark 的 `dyno` 系统给每个 splat 写 GPU 修改器 | cocolinux 的 `shaderEffects.js`（其本身改编自 Spark 官方示例） | 借鉴的是「用 objectModifier + dynoBlock 注入 GLSL」这个**架构模式**。这是 Spark 的公开 API 用法，具体效果代码全部重写 |
-| 📌B | 「空间呼吸」效果 | cocolinux 的 `breathAnimation`（Deep Meditation 效果） | 借鉴的是「让点云随时间周期性胀缩、模拟呼吸」这个**概念**。他的实现是 ~4.2 秒固定周期 + 旋转耦合；我们的实现换成可配置的呼吸节律（默认 6 秒，可改 4-7-8），数学公式不同，且去掉了旋转（对疗愈场景太晃） |
-| 📌C | 「场景从虚无中显形」入场 | cocolinux 的 `Magic` 效果 | 借鉴的是「入场时 splat 从 scale≈0 渐变显形」这个**概念**。他的实现是 atan 角度扫描（像雷达扫一圈）；我们的实现改成**绕悬浮球（场景中心）向外的球面波显形，并由用户的心情输入事件触发**，更安静、更符合「空间因你而苏醒」的叙事 |
+| 📌A | 用 Spark 的 `dyno` 系统给每个 splat 写 GPU 修改器 | cocolinux 的 `shaderEffects.js`（改编自 Spark 官方示例） | 借鉴「用 objectModifier + dynoBlock 注入 GLSL」这个**架构模式**。Spark 公开 API 用法，效果代码全部重写 |
+| 📌B | 「场景从虚无中显形」入场 | cocolinux 的 `Magic` 效果 | 借鉴「splat 从 scale≈0 渐变显形」这个**概念**。他用 atan 角度扫描（雷达式）；本方案重写为**绕悬浮球（场景中心）向外的双锋面球面波，由「AI 响应 ready」事件触发**（Step 6） |
 
-另外两处属于公共领域的标准做法，不算借鉴某个人：Web Audio `AnalyserNode` 做音频分析（MDN 标准用法）、`renderer.xr` 的 WebXR 设置（Three.js 官方文档用法）。
-
-原仓库是 MIT 协议，即使直接用他的代码也合法（保留版权声明即可），但既然你要原创 + 学习，我们走重写路线。
+另两处属公共领域标准做法：Web Audio `GainNode`（MDN）、`renderer.xr` 的 WebXR 设置（Three.js 官方）。原仓库 MIT 协议，即使直接用也合法；走重写路线是为了原创 + 学习。
 
 ---
 
-## 1. 为什么换到这套技术栈（决策回顾）
-
-| 维度 | A-Frame + quadjr（旧方案） | Spark + Three.js（本方案） |
-|------|---------------------------|---------------------------|
-| WebXR 接入 | 几乎白送（一个组件） | 需要自己写 ~30 行（本文 Step 2 全给出） |
-| 逐 splat shader 控制 | 几乎没有 | dyno 系统，完全控制 center / scales / rgba |
-| 文件格式 | `.splat`（大） | `.spz`（压缩，Marble 原生导出） |
-| 流式加载 | 无 | Spark 2.0 支持 LOD 流式加载 |
-| 与 Marble 生态 | 无关联 | 同一家公司，官方推荐渲染器 |
-
-核心判断：你的项目卖点是**视觉质感本身就是干预手段**（呼吸的空间、梦境般的显形）。这些只有 dyno 级别的控制做得出来，所以多写 30 行 WebXR 样板是值得的交换。
-
----
-
-## 2. 项目结构
+## 3. 项目结构
 
 ```
-dreamcore-spa/
+ones-own-room/
 ├── public/
-│   ├── index.html              # 入口：importmap + 门槛层(threshold overlay) + 进入按钮
+│   ├── index.html              # 入口：importmap + 门槛层 overlay（透明，透出 canvas 里的球）
 │   └── resources/
 │       ├── worlds/
-│       │   ├── env_1.spz       # Marble 导出，选 500k 轻量档
-│       │   ├── env_2.spz
-│       │   └── env_3.spz
+│       │   └── env_*.spz       # Marble 导出，500k 轻量档
 │       ├── env/
-│       │   └── dream_cube.*    # 悬浮球显形前反射用的梦核 cubemap（见 Step 5++）
+│       │   └── {px,nx,py,ny,pz,nz}.png   # 悬浮球反射用梦核 cubemap（6 张 png）
 │       └── audio/
-│           └── ambient_1.mp3
+│           ├── ambient_1.mp3
+│           ├── guide_welcome.mp3         # "Welcome to One's Own Room — also, your own room."
+│           ├── guide_name.mp3            # "What may this room call you? You don't need a name here."
+│           ├── guide_mood.mp3            # "Hold the orb, and tell me how you are."
+│           └── fallback_1..3.mp3         # AI 管线失败时的英语兜底语音
 ├── js/
-│   ├── main.js                 # 场景、WebXR、主循环、门槛层进入手势
-│   ├── effects.js              # dyno shader：呼吸 + 显形 + 辉光/薄雾（本文核心）
-│   ├── glow.js                 # 加法混合光尘粒子层
-│   ├── orb.js                  # 悬浮球：金属聆听态 + 半透明陪伴态 + 变形（新）
-│   ├── voice.js                # VR 内麦克风采集 + 语音转文字（新）
-│   ├── session.js              # 事件驱动编排：orb 状态机、显形 gating、语音、切换
-│   └── audio.js                # 音频管理：解锁、ambient、语音播放
+│   ├── main.js                 # 场景、WebXR、主循环、debug 控制 【已实现】
+│   ├── threshold.js            # 门槛层：语音引导 + 姓名/无名 + 量表 + 对球口述心情 【待建】
+│   ├── effects.js              # dyno shader：显形 + 辉光/薄雾 【已实现】
+│   ├── glow.js                 # 加法混合光尘粒子层 【已实现】
+│   ├── orb.js                  # 悬浮球：金属聆听/玻璃陪伴 + waiting/speaking 【已实现】+ recording 态【待建】
+│   ├── voice.js                # 按住球录音 + STT（每回合一次）【待建，先 spike】
+│   ├── session.js              # 事件驱动编排 【重构：删定时 slots，加回合循环】
+│   ├── audio.js                # 解锁、ambient、ducking、playVoice 【已实现】+ oneFallback/mic analyser【待建】
+│   └── roomMenu.js             # 进房后键盘小菜单 【demo 后】
 ├── api/
-│   ├── generate-script.js      # Claude 生成脚本（session 内调用，跟随用户输入语言）
-│   ├── tts.js                  # ElevenLabs TTS（多语言模型 + 语言码选声）
-│   └── stt.js                  # （可选）服务端语音转文字，走哪条看 Step 5+ 的 spike
+│   ├── generate-script.js      # Claude：开场白 + 每回合回应（Woolf persona，语言跟随）【待建】
+│   ├── tts.js                  # ElevenLabs TTS 【待建】
+│   └── stt.js                  # 服务端语音转文字（是否需要看 voice.js spike 结果）【待建】
 └── vercel.json
 ```
 
-**本版结构相对上一版的两处关键变化：**
+**关键结构决定**：
 
-1. **没有独立的 `onboarding.html` 了。** 心情输入从「进场前的填表页」搬进了体验本身——进场后你对着悬浮球说出心情。但收集姓名/打字/无障碍选项的那个 2D「门槛」并没有消失，它变成 **index.html 里的一个 DOM overlay（同一个页面），不是一个会跳转的独立页面**。原因在 Step 1 和 Step 8 详述：`AudioContext` 不能跨页面导航存活，所以解锁音频的那一下手势必须和 WebXR session 在同一个页面上；做成 overlay 就能用**一次手势**同时解锁音频、拿到麦克风、进入 VR。
-
-2. **多了 `orb.js`（悬浮球）和 `voice.js`（语音输入）两个子系统**，`generate-script.js` / `tts.js` 从「进场前预生成」改成「session 内即时调用」。这条因果链最深的后果是：**显形不再由时间轴驱动，而由「AI 响应 ready」这个事件驱动**（Step 5、Step 6 详述）。
-
----
-
-## 3. Step 1 — index.html：importmap 与入口
-
-```html
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dreamcore Spa</title>
-  <style>
-    body { margin: 0; overflow: hidden; background: #000; }
-    #vr-button {
-      position: fixed; bottom: 28px; left: 50%;
-      transform: translateX(-50%);
-      padding: 14px 36px;
-      background: rgba(107, 72, 200, 0.85);
-      color: #fff; border: none; border-radius: 28px;
-      font-size: 1rem; letter-spacing: 0.06em;
-      cursor: pointer; z-index: 10;
-      backdrop-filter: blur(8px);
-    }
-    #vr-button:disabled { opacity: 0.4; cursor: default; }
-  </style>
-</head>
-<body>
-  <button id="vr-button" disabled>Loading…</button>
-
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
-      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/0.1.9/spark.module.js"
-    }
-  }
-  </script>
-
-  <script type="module" src="./js/main.js"></script>
-</body>
-</html>
-```
-
-**这段在做什么：**
-
-- `importmap` 是浏览器原生功能，让你在没有打包工具（Webpack/Vite）的情况下用 `import * as THREE from "three"` 这种裸模块名。浏览器看到 `"three"` 就去 importmap 里查实际 URL。这就是为什么整个项目不需要 build step，`npx serve` 就能跑。
-- Spark 的版本号锁死在 `0.1.9`。**Three.js 和 Spark 的版本要配套**——Spark 内部依赖 Three.js 的渲染管线，大版本错配会出现 splat 不渲染的玄学问题。升级时两个一起升，先看 Spark 的 release notes 写支持哪个 Three 版本。
-- 自定义按钮而不用 Three.js 自带的 `VRButton.js`，是因为我们要在这一下点击里**一次做三件事**：解锁音频（AudioContext）、拿到麦克风（getUserMedia）、进入 VR session。这三件都要求「用户手势」，而进场的「Enter the Space」是我们唯一保证有的那次手势。**关键：门槛是 index.html 里的一个 DOM overlay（在 VR 渲染层之上的一张 2D 屏），不是一个会跳转到 index.html 的独立页面**——因为 `AudioContext` 一旦发生页面导航就被销毁，解锁了也白解锁。同一个页面、一次手势、overlay 淡出后立刻进 VR，是唯一能让音频不掉链子的结构（详见 Step 8）。
-- **系统语言约定**：所有面向用户的界面文案（按钮、门槛层的表单、提示）统一用英语；用户输入的自由文本（在门槛层打字，或进 VR 后对球说话被转写成的文字）可以是任何语言，AI 生成的语音脚本会跟随用户的输入语言（Step 8 详述）。两层分离：系统说英语，体验内容说用户的语言。
+1. **门槛层是同页 DOM overlay，不是独立页面**——`AudioContext` 跨页面导航即销毁，同页 overlay 才能让「touch to begin」解锁的音频活到 VR 里。
+2. **门槛层 overlay 是透明的**：canvas 上此刻正是 uReveal=0 的全黑虚空 + 金属聆听态的球——门槛层的「主视觉」就是**真球本身**，不做假球。DOM 只负责文字与输入件，浮在球的上下方。
+3. **心情口述在门槛层完成，动作与房间内完全一致**（按住球说、松手结束）：用户在进房前就学会了房间里唯一需要学的动作。
 
 ---
 
-## 4. Step 2 — main.js：场景与 WebXR 基础
+## 4. 三层输入架构（概念主干）
 
-这是整个项目的骨架。WebXR 部分是 Three.js 官方标准做法（非借鉴某个项目）。
+房间接收三层输入，按**生成延迟**分层，这个分层决定了每层能不能做成真·实时：
 
-```javascript
-// js/main.js
-import * as THREE from "three";
-import { SplatMesh } from "@sparkjsdev/spark";
-import { setupEffects } from "./effects.js";
-import { SessionTimeline } from "./session.js";
-import { AudioManager } from "./audio.js";
+| 层 | 输入 | 生成方式 | 延迟 | 实时性 | demo 状态 |
+|----|------|---------|------|--------|-----------|
+| **房间** | Marble prompt（实验前由研究者铺好） | 世界模型生成 | 几十秒~几分钟 | 不可能实时 → **预生成、绿野仙踪式** | ✓ 使用中 |
+| **环境参数** | valence × arousal 量表 | shader uniform，改 float | 零 | **真·实时、零延迟** | 量表照测，**映射推后**（Step 5.5） |
+| **声音** | 心情描述 + 每回合语音 | LLM + TTS 往返 | 1~4 秒 | **近实时**，回合制扛得住 | demo 核心 |
 
-// ---------- 1. 渲染器 ----------
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.xr.enabled = true;                 // ★ 开启 WebXR
-renderer.xr.setFoveation(1.0);              // ★ Quest 性能：边缘降分辨率
-document.body.appendChild(renderer.domElement);
+三层的关系是本项目最值得写进研究贡献的地方：房间是预生成的（wizard-of-oz）；环境参数不经过任何大模型、是唯一零延迟的层，接上后量表就从「测量」变成「generative input」（aesthetics-as-function 的落点）；声音是唯一「内容可实时生成、又扛得住实时」的层，realtime 的成本花在这里最值——回合制（按住球说、松手、她慢慢回）绕开了实时对话最难的端点检测与首字延迟焦虑：松手就是说完，慢本身读作「她在认真听」。
 
-// ---------- 2. 场景与相机 rig ----------
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x050510);
-
-const camera = new THREE.PerspectiveCamera(
-  70, window.innerWidth / window.innerHeight, 0.05, 100
-);
-
-// rig：包住相机的空 Group。VR 里相机位置被头显接管，
-// 你想"移动用户"时移动的是 rig，不是 camera。
-const rig = new THREE.Group();
-rig.position.set(0, 0, 0);
-rig.add(camera);
-scene.add(rig);
-
-// ---------- 3. 加载 Marble 导出的 .spz ----------
-const splat = new SplatMesh({ url: "./resources/worlds/env_1.spz" });
-splat.position.set(0, 0, 0);
-scene.add(splat);
-
-// Marble 导出的世界坐标系通常和 Three.js 一致（Y-up），
-// 但每个场景的"地面高度"不一定在 y=0。
-// 桌面模式下先用下面的调试快捷键找对位置，再写死。
-window.addEventListener("keydown", (e) => {
-  const step = e.shiftKey ? 0.5 : 0.1;
-  if (e.key === "ArrowUp")    splat.position.y -= step;
-  if (e.key === "ArrowDown")  splat.position.y += step;
-  if (e.key === "r")          splat.rotation.y += Math.PI / 12;
-  console.log("splat pos:", splat.position, "rot:", splat.rotation);
-});
-
-// ---------- 4. 效果 / 时间轴 / 音频 ----------
-const audio = new AudioManager();
-const effects = setupEffects(splat);          // Step 4–5：dyno shader
-const timeline = new SessionTimeline({        // Step 6：体验编排
-  scene, camera, splat, audio, effects
-});
-
-// ---------- 5. 进入 VR 按钮 ----------
-const btn = document.getElementById("vr-button");
-
-navigator.xr?.isSessionSupported("immersive-vr").then((ok) => {
-  btn.disabled = false;
-  btn.textContent = ok ? "Enter the Space" : "Experience in Browser";
-  btn.onclick = async () => {
-    await audio.unlock();                     // ★ 用户手势内解锁音频
-    if (ok) {
-      const session = await navigator.xr.requestSession("immersive-vr", {
-        optionalFeatures: ["local-floor", "bounded-floor"]
-      });
-      renderer.xr.setSession(session);
-    }
-    btn.style.display = "none";
-    timeline.start();                         // 体验时间轴从此刻起算
-  };
-});
-
-// ---------- 6. 主循环 ----------
-const clock = new THREE.Clock();
-
-renderer.setAnimationLoop(() => {
-  const dt = clock.getDelta();
-  const elapsed = clock.getElapsedTime();
-
-  effects.update(elapsed);     // 把时间喂给 shader
-  timeline.update(dt);         // 检查 voice slot / 环境切换
-  splat.updateGenerator();     // 让 Spark 应用本帧的 dyno 参数
-
-  renderer.render(scene, camera);
-});
-
-// 窗口缩放（仅桌面模式有意义，VR 里由头显决定分辨率）
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
-```
-
-**这段在做什么（逐块讲解）：**
-
-**渲染器块。** `renderer.xr.enabled = true` 是 Three.js 进 VR 的总开关，开了之后渲染器才会响应 XR session。`setFoveation(1.0)` 是注视点渲染——VR 画面边缘人眼本来就看不清，让 GPU 在边缘渲染更低分辨率，Quest 上能省下可观的性能，对高斯泼溅这种 fill-rate 密集的渲染尤其有效。`setPixelRatio` 限制到 2 是防止高 DPI 手机上渲染 3x 分辨率把 GPU 烧穿。
-
-**相机 rig 块。** 这是 WebXR 最重要的心智模型：**进入 VR 后，`camera` 的 position/rotation 每帧被头显追踪数据覆盖**，你手动设置无效。所以"用户在场景里的位置"由 rig（父节点）控制——想让用户出生在场景某处，移动 rig；想做整体漂移效果，动 rig。camera 留给头显。
-
-**Splat 加载块。** `SplatMesh` 是 Spark 的核心类，构造时给 URL 就开始异步加载，它本身是个 `THREE.Object3D`，可以正常 add 到场景、设置 position/rotation。`.spz` 是压缩泼溅格式，Marble 原生导出（导出时选 500k splats 的轻量档，Quest 上的流畅度和文件大小都最优）。调试快捷键那几行是给你自己用的：Marble 每个场景的原点位置不可预测，先在桌面模式用方向键把地面对到脚下，把 console 打出的数值写死进代码，再上头显。
-
-**进入 VR 块。** `navigator.xr.isSessionSupported` 先探测设备能力——Quest 浏览器返回 true，桌面 Chrome 返回 false（此时降级为普通 3D 页面，体验流程照常跑，只是不进头显）。`local-floor` reference space 让 y=0 自动对齐用户的真实地板高度，省去手动猜用户身高。**`audio.unlock()` 必须在这个 click handler 里调用**——这是整个项目最容易踩的坑：进了 VR 之后再想播声音，浏览器会拒绝，因为 VR 内的"凝视点击"在某些浏览器版本里不算合格的用户手势。
-
-> **本版对这一块的改动（详见 Step 8）：** 上面的极简按钮升级成**门槛 overlay 的进入手势**。同一个 onclick 里除了 `audio.unlock()`，还要 `getUserMedia()` 拿麦克风、读 overlay 表单的 `{name, moodText, inputMode}`；`SessionTimeline` 构造时多传 `orb` 和 `voice`；`timeline.start(inputs)` 带上这些输入。上面的代码块是骨架原型，按 Step 8 升级后才是本版的最终入口。
-
-**主循环块。** 注意必须用 `renderer.setAnimationLoop(fn)` 而**不是** `requestAnimationFrame`——XR session 有自己独立的帧回调（头显是 72/90Hz，和显示器不同步），`requestAnimationFrame` 在 VR session 内根本不会触发，这是 WebXR 新手第一大坑。`splat.updateGenerator()` 每帧调用，让 Spark 把本帧更新过的 dyno 参数（时间、呼吸幅度等）同步进 GPU。
-
-> 📌A 标注：`updateGenerator()` 每帧调用这个模式来自参考项目的 main.js（也是 Spark 官方示例的用法）。它属于 Spark 公开 API 的标准使用方式。
+**给研究者的铁律**：三层要能**各自独立开关**（环境映射可关、声音可整个关、球可不出现）。这是为未来实验（2×2 析因 / 分层分组）唯一现在要付的成本（Step 15）。
 
 ---
 
-## 5. Step 3 — dyno 系统是什么（概念课，不写代码先）
+## 5. UI 设计语言（门槛层与一切 2D 层的基准）
 
-在写效果之前，理解 dyno 的工作原理，不然后面的代码像咒语。
+### 原则
 
-**问题背景**：高斯泼溅场景是几十万到几百万个"泼溅点"（splat），每个点有四个属性——`center`（位置）、`scales`(三轴大小)、`rgba`（颜色和透明度）、旋转。想让场景"动起来"，就要每帧修改这些属性。在 CPU 上逐点改几十万个点，帧率直接归零，所以必须在 GPU 上改——也就是写 shader。
+- **雾中的界面**：UI 元素不是贴在屏幕上的卡片，是悬浮在深色雾气里的光。无实色填充、无阴影、无边框卡片；深度全靠光与雾的层次。
+- **一屏一焦点**：逐步式呈现，一次只问一件事；答完淡出，下一件浮现。
+- **一切淡入淡出**：没有任何硬切、弹跳、缩放动效；元素像从雾里凝出、又化回雾里。
+- **她引导，而不是表单引导**：每一步由预录语音发问（球同步 speaking 脉动），文字退成字幕与输入件。
+- **梦幻感来自光与雾，不来自装饰。**
 
-**dyno 的角色**：直接手写 GLSL shader 又要处理 Spark 内部的渲染管线细节，很痛苦。dyno 是 Spark 提供的**节点式 shader 构建系统**：你用 JavaScript 描述"对每个 splat 做什么变换"，dyno 把它编译成 GLSL 注入到 Spark 的渲染管线里。三个关键概念：
+### Design tokens（threshold.js / roomMenu.js 共用）
 
-1. **`splatMesh.objectModifier`** —— 挂载点。赋一个 `dynoBlock` 上去，Spark 渲染每个 splat 前都会先跑你的变换。
-2. **`dyno.Dyno({ inTypes, outTypes, globals, statements })`** —— 一个 shader 节点。`globals` 里写 GLSL 辅助函数（会被原样注入 shader 顶部），`statements` 里写主逻辑（每个 splat 执行一次）。
-3. **`dyno.dynoFloat(x)`** —— GPU uniform 的 JS 句柄。在 JS 里改 `myFloat.value = 0.5`，下一帧 GPU 里的值就变了。**这是 JS 世界和 GPU 世界之间唯一的桥**——时间、呼吸幅度、显形进度都靠它传进去。
-
-> 📌A 标注：以上架构模式（objectModifier + dynoBlock + dynoFloat 桥接）的用法参考了 cocolinux0101/dreamcore-experiment 的 `shaderEffects.js`，该文件本身注明改编自 Spark 官方仓库示例。这是该 API 的标准用法，下面所有效果的 GLSL 代码均为本方案原创。
-
----
-
-## 6. Step 4 — effects.js：空间呼吸效果
-
-> 📌B 标注：「让整个空间呼吸」的概念来自参考项目的 `breathAnimation`（Deep Meditation 效果）。他的版本是固定 ~4.2 秒周期、含旋转耦合、以场景某点为锚。**我们的版本重新设计**：(1) 呼吸周期可配置，默认 6 秒（接近放松呼吸引导的 5 breaths/min 节律）；(2) 用 raised-cosine 曲线代替纯正弦，吸气和呼气之间有自然的停顿感；(3) 去掉旋转（旋转在 VR 里诱发晕动症，疗愈场景绝对禁止）；(4) 呼吸的"源点"设在用户位置而非场景原点。
-
-```javascript
-// js/effects.js
-import { dyno } from "@sparkjsdev/spark";
-
-export function setupEffects(splatMesh) {
-
-  // ---- JS ↔ GPU 桥接 uniforms ----
-  const uTime    = dyno.dynoFloat(0);  // 全局时间（秒）
-  const uBreath  = dyno.dynoFloat(0);  // 呼吸相位 0..1（JS 算好喂进来）
-  const uBreathAmp = dyno.dynoFloat(0.012); // 呼吸幅度（米）
-  const uReveal  = dyno.dynoFloat(0);  // 显形进度 0..1（Step 5 用）
-
-  splatMesh.objectModifier = dyno.dynoBlock(
-    { gsplat: dyno.Gsplat },
-    { gsplat: dyno.Gsplat },
-    ({ gsplat }) => {
-
-      const node = new dyno.Dyno({
-        inTypes: {
-          gsplat: dyno.Gsplat,
-          t: "float", breath: "float", breathAmp: "float", reveal: "float"
-        },
-        outTypes: { gsplat: dyno.Gsplat },
-
-        // ---- GLSL 辅助函数（注入 shader 顶部）----
-        globals: () => [dyno.unindent(`
-
-          // 呼吸位移：把点沿"离用户的径向方向"轻推
-          // breath: 0..1 的呼吸相位（0=完全呼出, 1=吸满）
-          // 距离衰减：近处的点动得多，远处的点几乎不动，
-          // 这样呼吸感觉发生在"身边的空气里"而不是整个宇宙在抖
-          vec3 breathe(vec3 p, float breath, float amp) {
-            float d = length(p);
-            float falloff = exp(-0.35 * d);      // 距离衰减系数
-            vec3 dir = d > 0.001 ? p / d : vec3(0.0, 1.0, 0.0);
-            return p + dir * breath * amp * falloff * d;
-          }
-
-          // 显形波的中心：悬浮球所在的固定点（球在整个体验里不移动，
-          // 所以用编译期常量而不是 dyno uniform——省掉 uniform 四步接线，
-          // 也避开开发日记里 uScale「声明了、能读 .value、改不报错、就是不生效」那类坑）。
-          // 这个值用桌面调试快捷键对好后写死，和 orb.js 放球的点保持一致。
-          const vec3 REVEAL_CENTER = vec3(0.0, 1.4, -1.6);
-
-        `)],
-
-        // ---- 每个 splat 执行的主逻辑 ----
-        statements: ({ inputs, outputs }) => dyno.unindentLines(`
-          ${outputs.gsplat} = ${inputs.gsplat};
-
-          vec3 pos = ${inputs.gsplat}.center;
-
-          // 1) 呼吸位移
-          pos = breathe(pos, ${inputs.breath}, ${inputs.breathAmp});
-          ${outputs.gsplat}.center = pos;
-
-          // 2) 呼吸的"光"：吸气时整个空间极轻微地变亮
-          //    0.04 = 最多亮 4%，刚好在察觉阈值附近，
-          //    用户说不出哪里变了，但能感到空间"活着"
-          ${outputs.gsplat}.rgba.rgb *= 1.0 + 0.04 * ${inputs.breath};
-
-          // 3) 显形遮罩：以悬浮球所在的场景中心(REVEAL_CENTER)为原点，
-          //    球面波向外推（Step 5 详解；中心点在上方 globals 里定义）
-          float dC = length(${inputs.gsplat}.center - REVEAL_CENTER);
-          float edge = ${inputs.reveal} * 25.0;       // 显形波前半径（米）
-          float visible = smoothstep(edge, edge - 1.5, dC);
-          ${outputs.gsplat}.scales = mix(
-            ${inputs.gsplat}.scales, vec3(0.0005), visible
-          );
-        `),
-      });
-
-      gsplat = node.apply({
-        gsplat,
-        t: uTime, breath: uBreath, breathAmp: uBreathAmp, reveal: uReveal
-      }).gsplat;
-
-      return { gsplat };
-    }
-  );
-
-  splatMesh.updateGenerator();
-
-  // ---- JS 侧：每帧计算呼吸相位 ----
-  const BREATH_PERIOD = 6.0;   // 一次完整呼吸 6 秒 ≈ 10 次/分钟
-
-  function update(elapsed) {
-    uTime.value = elapsed;
-
-    // raised-cosine：比纯 sin 在顶端和底端各多停留一点，
-    // 像真实呼吸在吸满/呼尽时的自然停顿
-    const phase = (elapsed % BREATH_PERIOD) / BREATH_PERIOD;  // 0..1
-    const raw = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);    // 0..1..0
-    uBreath.value = raw * raw * (3 - 2 * raw);                // smoothstep 再柔化
-  }
-
-  return {
-    update,
-    uniforms: { uReveal, uBreathAmp }   // 交给 session.js 控制
-  };
+```css
+:root {
+  --room-bg:        #0b0b14;                 /* 深蓝紫夜色；scene.background 同步此值 */
+  --room-mist:      rgba(121, 119, 132, 0.35); /* 雾紫灰 #797784 */
+  --room-text:      rgba(240, 236, 244, 0.92); /* 带紫调的暖白 */
+  --room-text-dim:  rgba(240, 236, 244, 0.45);
+  --room-glow:      rgba(230, 210, 255, 0.55); /* 光晕（与 glow.js 贴图同色系） */
+  --room-line:      rgba(230, 210, 255, 0.30); /* 1px 微光描边 */
+  --font-serif:     ui-serif, "Georgia", "Songti SC", serif;
+  --ls-wide:        0.12em;                  /* 标题字距 */
+  --ls-body:        0.06em;
+  --fade-slow:      1.4s;                    /* 屏与屏之间 */
+  --fade-fast:      0.6s;                    /* 元素状态变化 */
+  --ease-mist:      cubic-bezier(0.4, 0.0, 0.2, 1);
 }
 ```
 
-**这段在做什么（逐块讲解）：**
+排印：**细字重衬线体、小号、宽字距、绝不用粗体**——安静的文学感，呼应 Woolf。输入件不用方框，用**一条发光细横线**（1px，`--room-line`，聚焦时缓慢提亮）。按钮只有一枚：药丸形磨砂玻璃（`backdrop-filter: blur(8px)` + 半透明 + 1px 微光描边）。点缀极少量 DOM 光尘微粒（失焦小光点缓慢漂移，呼应 3D 里的 glow dust）；球在场时可以更少甚至不加，球本身就是光源。
 
-**uniforms 块。** 四个 `dynoFloat` 是这套系统的"遥控器"。注意一个设计决策：**呼吸相位在 JS 里算，GPU 只拿结果**。也可以把 `sin(t)` 写进 GLSL 让 GPU 自己算，但放在 JS 有两个好处——(1) 以后想把呼吸节律做成用户可调（4-7-8 模式、或跟随实测呼吸传感器）时，只改 JS 不用动 shader；(2) 其他系统（比如音频音量）想和呼吸同步时，JS 里有现成的相位值可读。
+### 逐屏 spec
 
-**`breathe()` 函数。** 三行核心数学：`length(p)` 算每个点离原点（≈用户位置）的距离；`exp(-0.35*d)` 是指数衰减——1 米外的点保留 70% 的呼吸幅度，5 米外只剩 17%，远景几乎静止；最后把点沿径向（`p/d` 是单位方向向量）推出去 `breath * amp * falloff * d` 米。乘以 `d` 是让位移正比于距离（近似均匀缩放的感觉），乘以 `falloff` 又把远处压回去——两者相乘的净效果是位移在 ~3 米处达到峰值后衰减，**呼吸发生在用户身边的一圈空间里**。
+所有屏共享：透明背景透出 canvas（黑虚空 + 金属球），球在画面中心偏下（桌面相机 (0,1.6,0) 看向 −z，球在 (0,1.4,−1.6)，构图天然成立）。
 
-**rgba 那一行。** 这是个心理学小技巧：吸气时空间亮 4%。4% 在察觉阈值（just-noticeable difference）边缘，用户意识不到具体变化，但会感到空间是活的。这种 subliminal 的多通道耦合（位移 + 光）正是你研究里讲 functional aesthetic 可以引用的设计细节。
+**屏 0 · Title**。球上方远处一行 "One's Own Room"（宽字距、微光）；球下方一行极淡 "touch to begin"。**必须有这次轻触**：浏览器 autoplay 政策下，第一次手势前放不出任何声音——这次轻触同时完成 `audio.unlock()`（AudioContext 解锁提前到这里，Enter 手势减负）。轻触后播 `guide_welcome.mp3`，球走 speaking 脉动。
 
-**JS 的 raised-cosine。** `0.5 - 0.5*cos()` 把锯齿状的 phase 变成平滑的 0→1→0 山形；再过一次 smoothstep（`raw*raw*(3-2*raw)`）让山顶和谷底更平——效果是吸满和呼尽时各有一小段"屏息"，比纯正弦的机械感自然得多。这是和参考项目实现差异最大的一处。
+**屏 1 · 名字**。欢迎语毕，播 `guide_name.mp3`；球上方浮现发光横线输入位 + 字幕提示，横线下偏右一行淡的下划线字 **"I don't need a name here"**——它不是按钮，像一句可以被选择的低语；选它则字段淡出、`inputs.name = null`。给了名字的话，开场白里她会轻轻唤一次（「给 / 不给」因此有重量）。
 
-**幅度默认 0.012 米。** 12 毫米听起来很小，但 VR 里整个环境同步移动 12mm 是清晰可感的。**不要超过 0.03**——环境大幅运动而身体没动，前庭冲突会引发晕动症，疗愈应用里这是一票否决项。
+**屏 2 · 量表**。球退暗退小（`setState` 不动，DOM 侧压一层极淡遮罩即可，勿真改球参数）。五个**重绘的极简线条小人**横排悬浮（SAM 语义，见 Step 5.5）：1px 微光描边、无填充，valence 屏表情由低到高，arousal 屏用小人周围的振动线圈表现能量由静到动。悬停轻微变亮；选中者被柔光环包裹、微微上浮，其余更淡。整组上方一句衬线提示，小人下方**无文字标签**。两屏（或上下两组），各点一下。
 
----
+**屏 3 · 心情（对球说）**。球回到主角位、比之前亮一点像在等待；播 `guide_mood.mp3`（"Hold the orb, and tell me how you are."）。**按住球（或宽容判定：按住屏幕任意处）= 录音**：`getUserMedia` 在这次按住的手势里申请；球进 recording 态，光随音量脉动；松手结束。底部角落两个极淡出口：**"not today"**（跳过，开场白退化为不带 context 的通用版）和一个小键盘图标（切到发光横线的多行打字版）。
 
-## 7. Step 5 — 入场显形：空间为你苏醒
+**屏 4 · Enter**。球安静下来；药丸按钮从雾里凝出（从模糊到清晰、从暗到亮，`--fade-slow`），宽字距 "ENTER"。**画满才显现**：名字（或无名）+ 两个量表 + 心情（说了/打了/明确跳过）都完成才出现——Enter 是被「完成 check-in」挣来的门槛，不是等出来的。悬停光晕轻微增强，不放大不弹跳。
 
-> 📌C 标注：「入场时场景从虚无中显形」的概念来自参考项目的 `Magic` 效果。他的实现是 `atan(x,z)` 角度扫描——像雷达光束扫一圈，扫到哪里哪里出现，并带高亮边缘。**我们的版本重新设计**为从一个固定中心向外扩散的**球面显形波**，而这个中心就是**悬浮球所在的点**（REVEAL_CENTER）：体验开始时世界不存在，你面前只有一颗金属悬浮球；你对它说出心情、它收下之后，世界以球为圆心、一圈「存在的边界」缓慢向外推，在波前后方凝结成形。理由：角度扫描有方向性和速度感，偏「炫技」；球面波是各向同性的、安静的，且叙事上正确——**这个世界是从球（也就是从你刚刚交付的那句话）里生长出来的**，呼应 AI 个性化生成的概念，也呼应你 kagami→kami 那套去自我中心的哲学（空间不是被展示给你，而是因你的输入而显现）。
+**房间内 HUD**：几乎为零。仅右下角保留 34px 背景音开关（已实现）；其余一切交互都在球上。
 
-> **本版的结构性改动（最重要）：** 上一版里显形在进场后自动播放、由时间轴推进；这一版显形的**起点被 gate 在「AI 响应 ready」这个事件上**。从你说完话到世界显形之间，夹着语音转文字 + Claude 生成 + TTS 一整条链路，延迟不确定（3~10 秒），这段时间由悬浮球的「凝思」动画盖住（Step 5++、Step 6）。所以：**effects.js 内部绝不自动播放 uReveal，它只是一个等待外部驱动的 uniform；何时开始 ramp 由 session.js 在响应到达的那一刻决定。**
+### SAM 小人重绘的一个学术注脚
 
-显形的 GLSL 部分已经在 Step 4 的 statements 里（那几行「显形遮罩」），这里解释它的数学，然后给 JS 侧的驱动代码。
-
-**GLSL 部分回顾与解释：**
-
-```glsl
-float dC = length(center - REVEAL_CENTER);   // 点到悬浮球（场景中心）的距离
-float edge = reveal * 25.0;                  // 波前半径：reveal 0→1 时从 0 推到 25 米
-float visible = smoothstep(edge, edge - 1.5, dC);
-scales = mix(originalScales, vec3(0.0005), visible);
-```
-
-- 和上一版唯一的实质差别：距离从「点到用户」改成「点到 REVEAL_CENTER（球的位置）」，于是波是绕着球展开的，不是绕着你的脚。其余数学完全一样。
-- `smoothstep(edge, edge - 1.5, dC)`：注意两个参数是**反着写的**（大值在前），所以输出也反转——`dC` 比波前远时输出 1（点被压缩成 0.0005 米的尘埃，肉眼不可见），比波前近 1.5 米以上时输出 0（点恢复原始大小），中间 1.5 米是平滑过渡带。
-- 用 `scales → 0.0005` 而不是 `rgba.a → 0` 来隐藏点，是泼溅渲染的实用技巧：把 scale 压到亚毫米级，点在屏幕上小于一个像素，等效不可见，而且**比改透明度便宜**——几十万个半透明大点的 alpha 混合是泼溅渲染最贵的操作之一，缩小尺寸直接降低了 fill rate。
-- 过渡带里的点处于"半凝结"状态（尺寸介于尘埃和实体之间），视觉上像雾气固化成物质，这就是梦核感的来源，不需要任何额外特效。
-
-**JS 侧驱动（逻辑示意；真正的实现在 Step 6 的状态机里）：**
-
-```javascript
-// 显形动画：用 ease-out 曲线把 uReveal 从 0 推到 1
-// duration 建议 12–18 秒——足够慢，慢到用户会主动环顾四周
-// ★ 注意：这个函数不在进场时自动调用，而是在「AI 响应 ready」那一刻才被触发
-function playReveal(uReveal, duration = 15) {
-  const start = performance.now();
-  return new Promise((resolve) => {
-    function step() {
-      const t = Math.min((performance.now() - start) / (duration * 1000), 1);
-      uReveal.value = 1 - Math.pow(1 - t, 3);   // cubic ease-out
-      if (t < 1) requestAnimationFrame(step);
-      else resolve();
-    }
-    step();
-  });
-}
-```
-
-**这段在做什么：** cubic ease-out（`1-(1-t)³`）让波前一开始推进快（用户立刻看到世界从球里成形，不会以为卡死），越往远处越慢（远景慢慢洇开）。但**触发时机是本版的灵魂**：它不再「进场即播」，而是由 session.js 在收到 AI 响应的那一刻调用——在此之前，用户面对的是一颗还在「凝思」的悬浮球（Step 5++），球的循环动画负责把这段不确定的等待盖住。换句话说，**显形等响应，而不是响应等一个写死的动画时长**。
-
-> 注意这里用 `requestAnimationFrame` 而主循环用 `setAnimationLoop`——rAF 在 VR session 里不触发是指**渲染回调**，但这种纯数值动画在部分浏览器里也会被暂停。所以上面这个独立函数仅用于理解逻辑；**真正的实现把 reveal 进度放进 `session.update(dt)` 里用 dt 累积**（Step 6），并且只在状态机进入 REVEAL 状态后才推进。
+标准 SAM 图形与本项目视觉语言不合，按上述线条风格重绘，但**五点语义严格忠实原版**（valence: 皱眉→中性→微笑；arousal: 静→爆发）。论文写法："a SAM-inspired pictorial scale redrawn in the project's visual style"。审稿人可能问一句 validity——接受这个小代价，属 HCI 常见做法。
 
 ---
 
-## 7.5 Step 5+ — 梦幻辉光（Dreamy Glow）
+## 5.5 valence × arousal 量表 【待建；映射推后，框架保留】
 
-### 先讲一个反直觉的事实：高斯泼溅"打不了光"
+### 理论底座
 
-在传统 Three.js 场景里，加辉光是放几个 `PointLight` 再挂一个 bloom 后处理。但这条路在泼溅场景里**根本走不通**，原因要从渲染原理理解：
+**Russell 的 circumplex model of affect（1980）**：情绪落在 valence（效价）× arousal（唤醒）二维空间。**量表工具用 SAM（Self-Assessment Manikin, Bradley & Lang 1994）**：图形化、非语言。选它的理由：几乎无文案、一点即答，贴合 voice-first 极简界面；与 VET 论文的 Lang three-system model 同一学术血脉，instrument 有连续性；valence/arousal 是一对坐标，天然可参数化环境（接上映射后量表即成 generative input）。
 
-1. **Splat 不响应 Three.js 灯光。** 普通 mesh 的材质有法线，shader 根据灯光方向算明暗；而每个 splat 的颜色是**拍摄/生成时烘焙死的**，Spark 的渲染管线里没有光照计算这一步。你往场景里加一万个 PointLight，splat 一个像素都不会变。
-2. **Bloom 后处理在 Quest 上是性能灾难。** Three.js 的 `UnrealBloomPass` 要把整帧画面渲染到纹理、多次降采样模糊、再叠加回来——VR 是双眼双倍渲染，Quest 的移动 GPU 跑这套帧率直接腰斩。而且 `EffectComposer` 和 WebXR 的兼容本身就需要额外折腾。
+维度：**二维，不加 dominance**（PAD 第三维与 VET 的 perceived control 同构，但为极简与可映射砍掉）。形态：**两条 SAM 五点**（Affect Grid 一次成型但认知负荷略高，不用）。**避开**：PHQ-9 / GAD-7 等临床量表（pathologize，与 subclinical 定位冲突）；PANAS（20 词条太重）。
 
-所以"梦幻辉光"要换一种思路：**不做真实的光照模拟，做光的"感觉"**。三层叠出来，每层都是 Quest 能轻松负担的：
-
-### 第一层：dyno 内的亮部泛光（核心层）
-
-原理：人眼判断"这里在发光"的最强线索，是亮部颜色**向外溢出、且偏向某个色温**。我们在 shader 里识别每个 splat 的亮度，给亮的 splat 同时做三件事——轻微放大（光晕感）、提升亮度（过曝感）、向梦核色调偏移（薰衣草紫/桃粉的色温）。
-
-在 `effects.js` 的 uniforms 区新增两个遥控器：
+### demo 期的处理：测量直通、映射断开
 
 ```javascript
-const uGlow     = dyno.dynoFloat(0.5);   // 辉光强度 0..1
-const uGlowTint = dyno.dynoFloat(0.0);   // 色调偏移量（保留给情绪联动）
-```
-
-在 `globals` 里新增 GLSL 辅助函数：
-
-```glsl
-// 感知亮度：人眼对绿色最敏感，所以三通道权重不同
-// 这组系数是 Rec.709 标准亮度公式，图形学的公共知识
-float luminance(vec3 c) {
-  return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
-
-// 梦核辉光色：亮部溢出时偏向的颜色
-// 薰衣草紫——dreamcore 色板的核心色相
-const vec3 GLOW_TINT = vec3(0.78, 0.62, 0.95);
-```
-
-在 `statements` 里、呼吸位移之后新增：
-
-```glsl
-// ---- 梦幻辉光 ----
-float lum = luminance(${outputs.gsplat}.rgba.rgb);
-
-// glowMask: 只有亮度超过 0.55 的 splat 参与辉光，
-// smoothstep 让参与程度随亮度平滑爬升（避免硬边界）
-float glowMask = smoothstep(0.55, 0.9, lum) * ${inputs.glow};
-
-// (1) 光晕：亮 splat 放大至最多 1.6 倍——
-//     splat 本身是高斯衰减的软椭球，放大后边缘自然羽化，
-//     这就是"免费的 bloom"：单个 splat 的形状天生就是光斑
-${outputs.gsplat}.scales *= 1.0 + 0.6 * glowMask;
-
-// (2) 过曝：亮部颜色推向 1.0 以上再被显示截断，产生"白芯"
-${outputs.gsplat}.rgba.rgb *= 1.0 + 0.5 * glowMask;
-
-// (3) 色温：溢出的光偏向梦核紫，混合比例随 glowMask 走
-${outputs.gsplat}.rgba.rgb = mix(
-  ${outputs.gsplat}.rgba.rgb, GLOW_TINT * (1.0 + lum), 0.35 * glowMask
-);
-```
-
-（记得把 `glow: "float"` 加进 `inTypes`，`glow: uGlow` 加进 `node.apply()` 的参数。）
-
-**这段在做什么（关键洞察）：** 第 (1) 步是整层的灵魂。传统渲染里 bloom 之所以贵，是因为要在屏幕空间做模糊；但**高斯 splat 本身就是一个边缘软衰减的光斑**——把亮的 splat 放大 1.6 倍，它的高斯边缘自然晕开，视觉效果就是光在溢出。等于借用了泼溅这种表示法的数学性质，把后处理的活在几何阶段免费做掉了。这是泼溅渲染独有的 trick，传统 mesh 做不到。
-
-`0.55` 这个亮度阈值是给 Marble 生成的室内场景调的经验起点：窗户、灯具、天光这些天然亮区会被选中发光，墙面家具不受影响。如果你的场景整体偏亮（比如白色泳池场景），把阈值提到 0.7，否则满屏都在发光就不梦幻了，是雾里看花变成雾里看雾。
-
-### 第二层：addtive 光尘粒子（氛围层）
-
-dreamcore 的标志性元素之一：空气里悬浮的发光尘埃。用 `THREE.Sprite` + 加法混合实现，这是标准 Three.js 技巧（公共知识，非借鉴），成本极低且在 WebXR 里完全正常工作：
-
-```javascript
-// js/glow.js
-import * as THREE from "three";
-
-// 程序化生成一张"光点"贴图：中心白、边缘透明的径向渐变
-// 不用美术资源，一个 canvas 搞定
-function makeGlowTexture() {
-  const size = 64;
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  const grad = ctx.createRadialGradient(
-    size / 2, size / 2, 0, size / 2, size / 2, size / 2
-  );
-  grad.addColorStop(0.0, "rgba(255,255,255,1)");
-  grad.addColorStop(0.3, "rgba(230,210,255,0.6)");
-  grad.addColorStop(1.0, "rgba(200,180,255,0)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, size, size);
-  return new THREE.CanvasTexture(canvas);
-}
-
-export function createGlowDust(scene, count = 80) {
-  const texture = makeGlowTexture();
-  const sprites = [];
-
-  for (let i = 0; i < count; i++) {
-    const mat = new THREE.SpriteMaterial({
-      map: texture,
-      blending: THREE.AdditiveBlending,  // ★ 加法混合 = 光的物理直觉
-      depthWrite: false,                 // 不写深度，互相不遮挡
-      transparent: true,
-      opacity: 0.15 + Math.random() * 0.25,
-    });
-    const s = new THREE.Sprite(mat);
-
-    // 随机分布在用户周围 1–5 米的环带里
-    const angle = Math.random() * Math.PI * 2;
-    const r = 1 + Math.random() * 4;
-    s.position.set(
-      Math.cos(angle) * r,
-      0.3 + Math.random() * 2.4,
-      Math.sin(angle) * r
-    );
-    const scale = 0.02 + Math.random() * 0.06;   // 2–8 厘米的光点
-    s.scale.set(scale, scale, 1);
-
-    // 给每个粒子存一份漂浮参数（不每帧 new 对象）
-    s.userData = {
-      baseY: s.position.y,
-      speed: 0.2 + Math.random() * 0.4,
-      phase: Math.random() * Math.PI * 2,
-    };
-    sprites.push(s);
-    scene.add(s);
-  }
-
-  // 每帧调用：缓慢的上下漂浮 + 呼吸联动的明暗
-  function update(elapsed, breath) {
-    for (const s of sprites) {
-      const { baseY, speed, phase } = s.userData;
-      s.position.y = baseY + Math.sin(elapsed * speed + phase) * 0.15;
-      s.material.opacity =
-        (0.15 + 0.1 * Math.sin(elapsed * speed * 0.7 + phase))
-        * (0.8 + 0.4 * breath);          // ★ 吸气时光尘整体变亮
-    }
-  }
-
-  return { update };
+// effects.js — demo 版 applyMood：只留框架，不驱动任何视觉
+export function applyMood(valence, arousal) {
+  // v1 (demo): 数据照收，随 generate-script 请求发给 AI 当 context（Step 12），
+  // 并进研究者 session log（Step 14）。不改任何 uniform。
+  // v2 (post-demo): 在此接通视觉映射，成本分层如下——
+  //   uLift(明暗)   → uExposure 已是 uniform，JS 直接写 .value，零 shader 改动
+  //   uDynamics(动态)→ 光尘漂移速度/球 bob 都在 JS 侧，乘系数即可
+  //   uWarmth(冷暖) → GLOW_TINT 与 split-toning 的 WARM/COOL 目前是 dynoConst，
+  //                    需走 dyno 四步新增 uniform（声明/inTypes/apply/statements 引用），
+  //                    且受 Spark 版本缓存管辖（updateVersion 已在 effects.update 隔帧跑）
 }
 ```
 
-**这段在做什么：** `AdditiveBlending` 是"发光感"的物理来源——加法混合下颜色只会叠加变亮（光的行为），不会像普通透明那样变浊（颜料的行为），两个光点重叠的地方更亮，和真实光斑一致。`depthWrite: false` 防止半透明粒子互相产生方形遮挡 artifact。最后一行把粒子亮度乘上呼吸相位——**吸气时连空气里的光尘都跟着亮起来**，三个通道（位移、环境光、光尘）在同一个节律上，这就是 Step 4 里说的"空间活着"的感觉来源。粒子的 update 接进 main.js 主循环：`glowDust.update(elapsed, uBreathPhase)`（在 effects.js 里把呼吸相位也 return 出来即可）。
-
-### 第三层：dyno 内的距离薄雾（纵深层）
-
-辉光要"梦幻"还差最后一味：纵深感。真实的雾气会让远处的东西褪向雾色，光在雾里有体积感。Three.js 自带的 `scene.fog` 对 Spark 的 splat 材质**不生效**（和打光不生效是同一个原因），所以雾也在 dyno 里做——在 statements 里辉光代码之后加三行：
-
-```glsl
-// ---- 距离薄雾：远处的 splat 颜色褪向雾色 ----
-const vec3 HAZE = vec3(0.72, 0.66, 0.86);          // 雾色：偏紫的灰
-float fogAmount = 1.0 - exp(-0.06 * length(pos));  // 指数雾，6% 密度
-${outputs.gsplat}.rgba.rgb = mix(
-  ${outputs.gsplat}.rgba.rgb, HAZE, fogAmount * 0.45
-);
-```
-
-**这段在做什么：** `1 - exp(-density * d)` 是图形学标准的指数雾公式（公共知识）：2 米外褪色 11%，10 米外褪色 45%，无穷远趋近上限。最后乘 0.45 是把雾的最大浓度封顶——你要的是 haze（薄霭）不是 fog（浓雾），远景仍然可辨认，只是像隔了一层柔光纱。雾色选偏紫的灰而不是纯灰，让雾本身也属于梦核色板，和第一层的 GLOW_TINT 同一色系。
-
-### 桌面演示版的可选加强：真 Bloom
-
-如果你要给 GOSIM/会议做**桌面（非 VR）演示版**，可以叠一个真正的 `UnrealBloomPass`（Three.js 官方后处理，公共知识）。这层只在非 VR 路径启用：
-
-```javascript
-// 仅当 navigator.xr 不可用或用户没进 VR 时启用
-// strength 0.4 / radius 0.8 / threshold 0.85 是适合泼溅场景的保守起点
-```
-
-VR 路径**永远不要**启用 EffectComposer——上面三层在 Quest 里已经给足辉光感，且帧率无忧。一套代码两条渲染路径，演示版好看，头显版流畅。
-
-### 三层的关系总结
-
-| 层 | 实现 | 负责的感受 | 性能成本 |
-|----|------|-----------|---------|
-| 亮部泛光 | dyno shader | "那里在发光" | ~0（几次乘加） |
-| 光尘粒子 | additive sprites | "空气里有光" | 80 个 sprite，可忽略 |
-| 距离薄雾 | dyno shader | "光有纵深" | ~0 |
-| 真 Bloom | 后处理（仅桌面） | 锦上添花 | 高，VR 禁用 |
-
-三层都接受呼吸相位调制的话（泛光强度、粒子亮度、雾浓度各乘一点 breath），整个光环境会和空间一起呼吸——这是参考项目没有的东西，也是"功能性美学"最可演示的形态。
+**接上映射后的叙事**（写在这里等着）：环境参数在 Enter 时生效，而世界此刻还是全黑；当世界显形时，它已带着你的 valence/arousal 定好的冷暖明暗绽放——你怎么说你的感受，直接决定了向你显现的房间的样子。届时还有一个研究分叉要正式定：房间**镜像**你的状态，还是 meet-and-lead 把你往平静带（默认镜像；后者是随时间变化的变量，实验更难控，留第二个 study）。
 
 ---
 
-## 7.7 Step 5++ — orb.js：悬浮球（金属聆听 → 半透明陪伴）
+## 6. main.js：场景与 WebXR 基础 【已实现】
 
-这是本版的新主角，也是把「输入心情」搬进体验内部的载体。它和语音、AI 完全解耦：**一个独立的 mesh 子系统，先在桌面把两个状态和它们之间的变形调好，临时用键盘翻状态测**。它是普通 `THREE.Mesh`，所以是 Step 3「splat 打不了光」那条规则的**唯一例外**——球可以用真材质、真 envMap，因为它根本不是 splat。
+已跑通，要点与踩坑（细节见开发日记 Phase 1）：
 
-球有两个状态：
-
-- **状态 A 聆听（pre-reveal）**：金属色、表面有环境反光、缓慢自转，悬在你面前的虚空里。这是你说出心情的时刻。
-- **状态 B 陪伴（post-reveal）**：半透明、散发白色柔光，落在场景中心（也就是 REVEAL_CENTER，世界从这里绽放）。这是世界显形后一直陪着你的那个存在。
-
-中间还有一个**凝思（thinking）**的过渡循环：你说完话、AI 还在生成时，球聚拢光、轻微胀缩，**这段动画必须能 loop、能容忍 3~10 秒的不确定延迟**（Step 6 的状态机驱动它）。
-
-### 反光从哪来：一张预置的梦核 cubemap
-
-状态 A 的金属球要反射「世界」，但此刻 splat 场景还没显形。所以反光用一张**预置的梦核 cubemap** 假装（放 `public/resources/env/`），别想着实时反射未显形的 splat——太贵也没必要。这张图可以直接用你 Dream Core Generator 出的图拼成 6 面，整条 pipeline 还是你自己的美学。
-
-```javascript
-// js/orb.js
-import * as THREE from "three";
-import { makeGlowTexture } from "./glow.js";   // 复用光尘那张程序化径向渐变贴图
-
-const ORB_CENTER = new THREE.Vector3(0.0, 1.4, -1.6);  // 与 effects.js 的 REVEAL_CENTER 一致
-
-export function createOrb(scene) {
-  // ---- 反光环境贴图（状态 A 用）----
-  const envMap = new THREE.CubeTextureLoader()
-    .setPath("./resources/env/")
-    .load(["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"]);
-
-  // ---- 内核球：状态 A=金属，状态 B=半透明白光（同一个材质，参数被 crossfade）----
-  const coreMat = new THREE.MeshStandardMaterial({
-    metalness: 1.0,
-    roughness: 0.08,
-    envMap,
-    envMapIntensity: 1.0,
-    color: 0xaab0c0,
-    emissive: 0xffffff,
-    emissiveIntensity: 0.0,     // 状态 B 时拉起来
-    transparent: true,
-    opacity: 1.0,               // 状态 B 时降下去做「半透明」
-  });
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.18, 48, 48), coreMat);
-  core.position.copy(ORB_CENTER);   // ★ world-anchored，挂在 scene 下，不是 camera
-  scene.add(core);
-
-  // ---- 外层柔光：加法混合的 halo sprite（状态 B 才显，假的「散发柔光」）----
-  // 不做真 transmission 折射——Quest 上要额外 render pass，太贵（见性能清单）
-  const halo = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: makeGlowTexture(),
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    transparent: true,
-    opacity: 0.0,               // 随 setState 抬起
-    color: 0xffffff,
-  }));
-  halo.position.copy(ORB_CENTER);
-  halo.scale.setScalar(0.9);
-  scene.add(halo);
-
-  let s = 0;                    // 状态参数 0(聆听)..1(陪伴)
-  let thinking = false;
-  let tAccum = 0;
-
-  function setState(v) { s = THREE.MathUtils.clamp(v, 0, 1); }
-  function setThinking(b) { thinking = b; }
-
-  function update(dt) {
-    tAccum += dt;
-
-    // 自转：聆听态明显，陪伴态几乎停下
-    core.rotation.y += dt * (0.6 * (1 - s) + 0.05);
-
-    // 漂浮：轻微上下
-    const bob = Math.sin(tAccum * 0.7) * 0.03;
-    core.position.y = ORB_CENTER.y + bob;
-    halo.position.y = core.position.y;
-
-    // 凝思：在响应到达前循环聚拢光（可无限 loop，时长不定）
-    const pulse = thinking ? (0.5 + 0.5 * Math.sin(tAccum * 3.0)) : 0.0;
-
-    // 状态 A→B crossfade：金属褪去、白光升起、半透明、柔光展开
-    coreMat.metalness        = 1.0 - 0.9 * s;
-    coreMat.roughness        = 0.08 + 0.5 * s;
-    coreMat.envMapIntensity  = 1.0 - 0.85 * s;
-    coreMat.emissiveIntensity = (0.0 + 1.4 * s) + 0.3 * pulse;
-    coreMat.opacity          = 1.0 - 0.45 * s;          // 半透明，但不做折射
-    halo.material.opacity    = (0.0 + 0.8 * s) + 0.25 * pulse;
-    halo.scale.setScalar(0.9 + 0.8 * s + 0.15 * pulse);
-  }
-
-  return { core, halo, update, setState, setThinking, center: ORB_CENTER };
-}
-```
-
-**这段在做什么（三处关键设计）：**
-
-**两态共用一个材质，靠参数 crossfade，而不是换两个对象。** `setState(0→1)` 同时把 metalness、roughness、envMapIntensity 往下带，把 emissive、halo 往上带——一个连续的过渡，正好和 Step 5 的显形在同一个时间窗里跑（Step 6 让二者一起 ramp）。金属在褪、白光在升，视觉上就是「球把刚收下的话化成了光」。
-
-**「半透明柔光」是假的，故意的。** 真正的半透明折射要用 `MeshPhysicalMaterial` 的 transmission，在 Quest 上需要一个额外的 transmission render pass，很贵。我们用 `opacity` 降一点（透出后面的场景）+ 一个加法混合的 halo sprite（散出白色柔光）凑出「半透明散发柔光」的**感觉**——和你「光斑大小靠 scale、亮度靠 overexpose，两者分开」那套质感哲学一脉相承：要的是观感，不是物理正确。（想再进一步，可以用 `onBeforeCompile` 给内核加一圈 fresnel rim，掠射角更亮——但这属于可选增强，且 `onBeforeCompile` 注入点要对着你这版 Three.js 实测，别凭记忆写。）
-
-**球是 mesh、要和 splat 有正确遮挡，所以这次要的恰恰是「正常的 depth test」。** 注意：你在光尘那里关掉了 depthTest（`depthTest:false`），因为那是要让光点永远浮在最前的氛围层；但球是场景里一个实体，世界显形后它该被前面的 splat 遮、也该遮住后面的 splat。所以内核球用默认 depth（写也读），只有 halo sprite 关 depthWrite（像光尘一样不互相挡）。**上头显第一件事就是验证这个遮挡关系对不对**——让 Claude Code「只查不改、带行号」报告球的 depth 设置和 splat 的 renderOrder，再决定动不动。
-
-> 这一节没有 📌 借鉴标注：悬浮球是本方案原创的交互载体，参考项目里没有对应物。唯一复用的是你自己 glow.js 的 `makeGlowTexture`（把它 `export` 出来即可）。
+- **相机 rig 模型**：VR 里 camera 被头显接管，移动用户只动 rig（父节点）。桌面眼高 1.6m，XR local-floor 自动给真实眼高，session start/end 时切换 rig.position.y。
+- **far=1000**：far=100 曾把室外天空裁成全黑——几何级异常（整片消失/变黑）先查相机和裁剪，再查材质混合。
+- **主循环必须 `setAnimationLoop`**：rAF 在 XR session 内不触发。
+- **`updateVersion()` 住在 effects.update() 里、隔帧 bump**（不在 main 循环里重复调用，见 Step 6 性能注）。
+- debug（?debug）：PointerLockControls + WASD 动 rig、方向键对位 splat、数字键试球态；全部 XR-gated，不做全局键盘拦截（给文字输入留口子）。
+- **待改两行**：`scene.background` 统一为 `0x0b0b14`（与 UI tokens 的 --room-bg 一致，门槛层淡出无缝接进虚空）；debug 段 `timeline.lateSlots = [20, 40]` 随 session.js 重构删除。
 
 ---
 
-## 8. Step 6 — session.js：事件驱动的体验编排
+## 7. dyno 系统是什么（概念课）
 
-这是新架构的心脏。它把悬浮球、语音输入、AI 管线、显形、语音播放、环境切换接成一条**事件驱动**的流程。和上一版最深的区别：**显形不再由时间轴推进，而是一个状态机，显形的起点 gate 在「AI 响应 ready」这个事件上。** 类名仍叫 `SessionTimeline`（main.js 还在 import 它），但它内部已经从「时间轴」变成「状态机」。
+高斯泼溅场景是几十万个 splat（center / scales / rgba / 旋转）。想让场景动就要每帧改这些属性——必须在 GPU 上改。dyno 是 Spark 的**节点式 shader 构建系统**：JS 描述「对每个 splat 做什么」，编译成 GLSL 注入管线。三个概念：
 
-状态机：`idle → listening → thinking → revealing → settled`。
+1. **`splatMesh.objectModifier`** —— 挂载点，赋一个 `dynoBlock`。**只设一次**；`updateGenerator()` 只在设置后调一次（它重建整个 shader pipeline，每帧调是性能灾难）。
+2. **`dyno.Dyno({ inTypes, outTypes, globals, statements })`** —— shader 节点；globals 放 GLSL 辅助函数，statements 是每 splat 主逻辑。
+3. **`dyno.dynoFloat(x)`** —— GPU uniform 的 JS 句柄，JS 改 `.value` 下一帧生效——**前提是 `updateVersion()` 在跑**（见坑清单头号条目）。
 
-```javascript
-// js/session.js
-import * as THREE from "three";
-
-export class SessionTimeline {
-  constructor({ scene, camera, splat, audio, effects, orb, voice }) {
-    this.splat = splat;
-    this.audio = audio;
-    this.effects = effects;
-    this.orb = orb;        // ★ 新：悬浮球子系统
-    this.voice = voice;    // ★ 新：语音输入子系统
-
-    // ---- 配置 ----
-    this.revealDuration = 15;     // 显形时长（秒）
-    // 入场语(slot1)在显形途中播；slot2/slot3 在「落定」之后按相对时间播
-    this.lateSlots = [180, 420];  // 相对 settled 的秒数
-
-    // ---- 状态机 ----
-    this.state = "idle";
-    this.elapsed = -1;            // 全程累积时间（dt 累积，摘头显自动暂停）
-    this.revealT = 0;            // 显形进度 0..1
-    this.settledAt = null;       // 落定时刻（elapsed）
-    this.lateFired = new Set();
-    this.audioUrls = [];         // AI 合成好的三段语音 URL
-    this.inputs = null;          // { name, moodText, inputMode }
-
-    // ---- 黑幕球（不变）：法线朝内的小球壳挂在 camera 下 ----
-    const fadeMat = new THREE.MeshBasicMaterial({
-      color: 0x000000, transparent: true, opacity: 0,
-      side: THREE.BackSide, depthTest: false,
-    });
-    this.fadeSphere = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), fadeMat);
-    this.fadeSphere.renderOrder = 999;
-    this.fadeTarget = 0; this.fadeSpeed = 1.2;
-    camera.add(this.fadeSphere);
-  }
-
-  // 进入 VR 后由 main.js 调用，带上门槛层收集到的输入
-  start(inputs) {
-    this.inputs = inputs;            // { name, moodText, inputMode }
-    this.elapsed = 0;
-    this.state = "listening";
-    this.orb.setState(0);            // 金属聆听态
-    this._listenThenGenerate();      // 不 await：让主循环继续跑
-  }
-
-  // 核心异步流程：听 → 凝思（盖延迟）→ 响应 ready → 进入 revealing
-  async _listenThenGenerate() {
-    // 1) 拿到心情文字：打字的直接返回；语音的开始采集 + STT
-    const moodText = await this.voice.getMood(this.inputs);
-
-    // 2) 进入凝思：球开始循环聚拢光，这个 loop 能撑住下面不确定的等待
-    this.state = "thinking";
-    this.orb.setThinking(true);
-
-    // 3) 跑 AI 管线（generate-script → tts）。失败也要继续（降级脚本）
-    try {
-      const r = await fetch("/api/generate-script", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: this.inputs.name, mood: "", need: moodText }),
-      }).then(x => x.json());
-      this.audioUrls = await this.audio.synthesizeAll(r.scripts, r.lang);
-    } catch (e) {
-      console.warn("AI pipeline failed, using fallback", e);
-      this.audioUrls = await this.audio.synthesizeFallback();  // 英语降级
-    }
-
-    // 4) 响应 ready —— 这就是那个「事件」。同时点燃显形 + 球变形
-    this.orb.setThinking(false);
-    this.revealT = 0;
-    this.state = "revealing";
-  }
-
-  update(dt) {
-    if (this.elapsed < 0) return;
-    this.elapsed += dt;
-    this.orb.update(dt);                 // 球每帧都更新（自转/漂浮/凝思脉动）
-
-    // ---- revealing：显形波 + 球 金属→白光，同窗 ramp ----
-    if (this.state === "revealing") {
-      this.revealT = Math.min(this.revealT + dt / this.revealDuration, 1);
-      const eased = 1 - Math.pow(1 - this.revealT, 3);   // cubic ease-out
-      this.effects.uniforms.uReveal.value = eased;       // 世界显形
-      this.orb.setState(eased);                          // 球同步化成白光
-
-      // 显形过半时播入场语（世界初具形状，声音随之降临）
-      if (this.revealT >= 0.5 && !this.lateFired.has("entry")) {
-        this.lateFired.add("entry");
-        this.audio.playVoice(this.audioUrls[0]);
-      }
-      if (this.revealT >= 1) { this.state = "settled"; this.settledAt = this.elapsed; }
-    }
-
-    // ---- settled：落定后按相对时间播 slot2/slot3 ----
-    if (this.state === "settled") {
-      const since = this.elapsed - this.settledAt;
-      this.lateSlots.forEach((t, i) => {
-        if (since >= t && !this.lateFired.has(i)) {
-          this.lateFired.add(i);
-          this.audio.playVoice(this.audioUrls[i + 1]);
-        }
-      });
-    }
-
-    // ---- 黑幕缓动（不变）----
-    const m = this.fadeSphere.material;
-    const diff = this.fadeTarget - m.opacity;
-    if (Math.abs(diff) > 0.001) {
-      m.opacity += Math.sign(diff) * Math.min(Math.abs(diff), this.fadeSpeed * dt);
-    }
-  }
-
-  // 环境切换：双缓冲预加载 + 渐黑渐亮（实现细节见下方说明，从略）
-  // 切换瞬间可把 uReveal 重置为 0 再播一次显形——每个新环境都为你重新苏醒一次
-}
-```
-
-**这段在做什么（重点讲四处）：**
-
-**显形是「被事件点燃」的，不是「按时间推进」的。** 看 `_listenThenGenerate()`：它先把心情文字拿到手，再进入凝思，**等 AI 管线真的返回了**才把 `state` 切到 `"revealing"`。`update()` 只有在 `revealing` 状态下才推进 `uReveal`。所以无论 AI 花 3 秒还是 10 秒，显形都不会提前开始、也不会卡死——这条就是 CLAUDE.md 里那条「reveal is event-driven, never on a timer」的落地。**最容易在后续改动中回归旧写法的地方就是这里**：它很可能顺手给你写个「进场 N 秒后开始显形」，盯住。
-
-**凝思动画负责盖住不确定的延迟。** `orb.setThinking(true)` 让球进入一个**能无限 loop** 的脉动；它不知道、也不需要知道 AI 要花多久。等响应到了，`setThinking(false)` + 切 `revealing`，凝思自然收束成显形。这种「用一个能循环的过渡，盖住一段你无法预估时长的异步等待」是所有「实时调 AI 又要丝滑」体验的通用解法。
-
-**显形和球的变形共享同一个 `eased`。** `uReveal.value = eased` 推世界显形，`orb.setState(eased)` 把球从金属带向白光——同一条 ease 曲线，所以世界绽放和球化光是同一个动作的两面。入场语在 `revealT >= 0.5` 时落下，让声音赶在世界初具形状时降临，而不是空场就先出声。
-
-**dt 累积、黑幕球、双缓冲切换都保留。** 摘头显时 session 暂停（dt 累积的好处不变）；黑幕用法线朝内的球壳挂 camera（VR 里 DOM 不存在的标准解法）；多环境切换仍建议双缓冲预加载（`visible` 开关换零等待），切换时把 `uReveal` 归零再显形一次，让「为你苏醒」的仪式在每个新场景重演。
-
-> **对 main.js 的连带改动（Step 2）：** 构造 `SessionTimeline` 时要多传 `orb` 和 `voice` 两个子系统；`start()` 现在要带上门槛层收集到的 `inputs`（`{ name, moodText, inputMode }`）；主循环不必再单独调 `orb.update`，session 已经在自己的 `update(dt)` 里替它转了。
+> 📌A：架构模式参考 cocolinux 的 `shaderEffects.js`。标准 API 用法，GLSL 全部原创。
 
 ---
 
-## 9. Step 7 — audio.js：音频管理
+## 8. effects.js：显形入场 + 三层辉光 【已实现】
 
-Web Audio 的标准用法（MDN 范式，非借鉴特定项目）。参考项目的 AudioAnalyzer 思路（FFT 驱动视觉）这版先不接——你不要水波纹之后，音频反应式视觉的必要性下降，留作 Phase 3 可选项。
+### 显形：世界因你苏醒
 
-```javascript
-// js/audio.js
-export class AudioManager {
-  constructor() {
-    this.ctx = null;
-    this.ambientGain = null;
-    // 本版不再从 onboarding 预读语音——语音是 session 内即时合成的（见 synthesizeAll）
-  }
+> 📌B：显形概念来自参考项目（atan 角度扫描）。本版重写为**绕球双锋面球面波**。叙事正确：世界从球——也就是从你刚交付的那句话——里生长出来。
 
-  // 必须在用户手势的调用栈里执行（门槛层「Enter the Space」的 onclick）
-  // 注意：麦克风权限(getUserMedia)也在同一个手势里申请，但那是 voice.js / main.js 的事，
-  // 这里只负责音频「输出」侧的解锁。
-  async unlock() {
-    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (this.ctx.state === "suspended") await this.ctx.resume();
+从全黑开始，两道锋面从球心向外推：**尘埃锋**（外，领先）扫过之处 splat 从亚像素隐形变成 ~4mm 星尘光点（压暗 35%）——世界先以点云被「召唤」；**凝结锋**（内，隔 2.5m 跟进）让星尘恢复全尺寸全亮——雾凝成物。三态两遮罩全部用 scales 实现（比 alpha 便宜，降 fill rate）。
 
-    // 播一段 0.05 秒的静音 buffer，把音频管线彻底"焐热"
-    // 某些 Quest 浏览器版本里只 resume 不够，这一下是保险
-    const buf = this.ctx.createBuffer(1, 2205, 44100);
-    const src = this.ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(this.ctx.destination);
-    src.start();
+- **实测半径**：splat 加载完 `getBoundingBox()` 算「球心到最远角」+5m，换场景不调参。
+- **对数空间推进**：实测半径被天空主导（几百米），线性推进会让近景半秒全弹出；锋面按 `r = R0·(e^(u·K)−1)` 指数推进，感知匀速——近处慢慢凝结、远空快速扫过。星尘锋在对数空间恒定倍率领先（×2.2）。
+- **冲刺段**（10m 后）：必须在**半径空间线性驱动**（JS 每帧 `r += v·dt`，反函数换算回 u 喂 shader），否则 u 匀速 = 半径指数爆炸、「啪」地出现。25m/s，4~9s 自适应场景大小，0.4s ease-in 交接。
+- **坐标一致性**：objectModifier 在 splat 本地空间跑（main.js 有 y=0.4 偏移），球心世界 (0,1.4,−1.6) = 本地 (0,1.0,−1.6)；effects.js 的 REVEAL_CENTER_LOCAL 与 orb.js 的 ORB_CENTER 必须对应。
 
-    this._startAmbient("./resources/audio/ambient_1.mp3");
-  }
+**事件驱动（灵魂）**：effects.js 内部绝不自动播 uReveal；`playReveal()` 由 session.js 在「AI 响应 ready」那一刻调用，返回「双锋面扫完全场才 resolve 的 Promise」。所有计时 dt 累积，绝无 setTimeout / 绝对时间，摘头显即全局暂停。
 
-  async _startAmbient(url) {
-    const res = await fetch(url);
-    const buf = await this.ctx.decodeAudioData(await res.arrayBuffer());
+### 三层辉光
 
-    const src = this.ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = true;
+高斯泼溅**打不了光**（颜色烘焙死，管线无光照步；Bloom 后处理 Quest 双眼双倍是灾难）。所以不做真实光照，做光的**感觉**：
 
-    this.ambientGain = this.ctx.createGain();
-    this.ambientGain.gain.value = 0;
-    src.connect(this.ambientGain).connect(this.ctx.destination);
-    src.start();
+| 层 | 实现 | 负责的感受 | 成本 |
+|----|------|-----------|------|
+| 亮部泛光 | dyno shader（scale 放大 + overexpose + 薰衣草 tint） | 「那里在发光」 | ~0 |
+| 光尘粒子 | additive sprites（glow.js，程序化贴图） | 「空气里有光」 | 80~180 sprite |
+| 距离薄雾 | dyno 指数雾，封顶 0.45，紫灰 | 「光有纵深」 | ~0 |
+| 真 Bloom | UnrealBloomPass，**仅桌面** | 锦上添花 | VR 永不启用 |
 
-    // 5 秒淡入到 0.35——进场后立刻起，铺在凝思/显形之下
-    this.ambientGain.gain.linearRampToValueAtTime(
-      0.35, this.ctx.currentTime + 5
-    );
-  }
+沉淀的关键认知：**亮度靠 overexpose、光斑大小靠 scale，两者分开**（scale 一高就出星芒）；星芒的根因是各向异性 splat 等比放大，**治法是揉圆**（uGlowRound 把发光 splat 向等半径球混合），不是调强度——单个 splat 在屏幕上永远是椭圆，四角星必须贴图（已放弃，保持 dyno-only）；光尘要 `depthWrite:false` **和** `depthTest:false` 都关 + `renderOrder:1`，否则被 splat 深度剔除；split toning（亮部暖金、阴影冷蓝，splitT=lum²）营造记忆感；grain 太吵已删，vignette 不做。
 
-  // ★ 新：session 内合成。把三段脚本逐段送 /api/tts，拿回可播的 URL
-  //   （脚本短，三段一起合成；slot1 入场语最要紧，放第一个）
-  async synthesizeAll(scripts, lang) {
-    const urls = await Promise.all(scripts.map((text) =>
-      fetch("/api/tts", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, lang }),
-      })
-      .then(r => r.blob())
-      .then(b => URL.createObjectURL(b))
-    ));
-    return urls;
-  }
+**性能注**：`updateVersion()` 每帧跑会强迫 Spark 重走几十万 splat 的生成管线，叠加旋转触发的重排序帧预算即爆——**隔帧 bump**（30Hz 动效无感知差），**显形播放期间例外**保持每帧（锋面每帧移动数米）。此逻辑在 effects.update() 内部，main.js 不重复调用。
 
-  // ★ 新：AI 管线整体失败时的英语降级（不依赖网络，预置静态文件或本地 TTS）
-  async synthesizeFallback() {
-    return [
-      "./resources/audio/fallback_1.mp3",
-      "./resources/audio/fallback_2.mp3",
-      "./resources/audio/fallback_3.mp3",
-    ];
-  }
-
-  // ★ 改：接受一个 URL（session 合成好的），而不是 sessionStorage 里的索引
-  async playVoice(url) {
-    if (!url || !this.ctx) return;
-
-    // ambient ducking：语音进来时垫乐让位
-    const now = this.ctx.currentTime;
-    this.ambientGain.gain.linearRampToValueAtTime(0.15, now + 1.0);
-
-    const res = await fetch(url);
-    const buf = await this.ctx.decodeAudioData(await res.arrayBuffer());
-    const src = this.ctx.createBufferSource();
-    src.buffer = buf;
-    const g = this.ctx.createGain();
-    g.gain.value = 0.85;
-    src.connect(g).connect(this.ctx.destination);
-    src.start();
-
-    // 语音结束后 ambient 恢复
-    src.onended = () => {
-      this.ambientGain.gain.linearRampToValueAtTime(
-        0.35, this.ctx.currentTime + 2.0
-      );
-    };
-  }
-}
-```
-
-**这段在做什么（讲两处关键设计）：**
-
-**unlock 里的静音 buffer。** 浏览器音频自动播放策略的实际表现比文档描述的更碎：理论上 `ctx.resume()` 在用户手势里调用就够了，但部分 Quest Browser 版本里 resume 成功后第一次真正播放仍会被吞掉。在手势调用栈里**实际播放过一次东西**（哪怕是 0.05 秒静音）能把管线彻底打开。这是 WebXR 音频的"民间偏方"，但有效到值得无条件加上。
-
-**ducking（垫乐避让）。** 语音 slot 触发时 ambient 从 0.35 降到 0.15，语音结束后 2 秒缓慢恢复。所有声音都走 Web Audio 的 GainNode 而不是 `HTMLAudio.volume`，因为 GainNode 的 `linearRampToValueAtTime` 是采样级精度的平滑斜坡，HTMLAudio 改 volume 是阶跃的，在安静的疗愈场景里听得出"咔"的台阶感。这也是为什么 voice 不直接 `new Audio(url).play()`——统一走 AudioContext 还顺便绕开了上一版方案里提过的 blob URL 兼容性问题。
+**清理项**：uBreath uniform（呼吸已删除）及 glow.js update 的 breath 形参，顺手清掉或置 0 不接。
 
 ---
 
-## 9.5 Step 8 — 语言跟随的 AI 脚本生成
+## 9. orb.js：悬浮球 【已实现；待补 recording 态】
 
-需求：**系统界面统一英语，但语音脚本的语言跟随用户的输入语言**。用户的心情可以**在门槛层打字**（中文写「想被接住」就听到中文引导），也可以**进 VR 后对悬浮球说出来**（语音被转写成文字，再走同一条管线）；混着写/说（你自己的习惯）就按主导语言走。本版与上一版的两点结构差异先讲清楚，再讲语言跟随。
+悬浮球是「陪伴」的具身，也是那个声音的**视觉锚点**：声音从球来。她的引导、开场白、每回合回应都由球的脉动包裹——**从 title 屏第一秒起，她就是同一个存在**。它是普通 THREE.Mesh（「splat 打不了光」规则的唯一例外）。
 
-### 入口：门槛层(threshold overlay) + 渐进展开
+**存在论闭环**：按住球 = 对她开口；球在但你不理它 = 独处。**「请她离开」就是不去触碰球**，没有关闭手势——陪伴不是被赶走的，是你选择不开口。
 
-不再有独立的 `onboarding.html`。门槛是 **index.html 里的一张 2D overlay**，盖在 WebXR 渲染层之上，默认极简、可展开：
+### 两个体验态（crossfade，已实现）
 
-- 默认只有一行安静的标题 + 一个 pill 按钮 **"Enter the Space"**（英语 UI）。
-- 一个**默认收起**的 "Options" 展开区，点开才显示：姓名（可选）、"Prefer to type how you feel?" 自由文本框（填了就走打字路径，进 VR 后可跳过对球说话）、几个可选的心情快捷 chip、一句说明「在这里打字，就不必在 VR 里出声」。
+- **金属聆听态（s=0）**：金属镜面反射预烘焙梦核 cubemap（世界未凝结，无真物可反射），缓慢自转，悬于虚空——**这正是门槛层全程的球**。
+- **玻璃陪伴态（s=1）**：半透明玻璃、内有折射的梦核，落在世界绽放的原点。
 
-点 "Enter the Space" 是**唯一那次用户手势**，它在同一个调用栈里依次做：`audio.unlock()`（解锁音频输出）→ `getUserMedia()`（申请麦克风，权限框在 2D 弹出，别等进了 VR 才弹）→ 读取 overlay 表单的 `{name, moodText, inputMode}` → overlay 淡出 → `requestSession("immersive-vr")` → `timeline.start(inputs)`。
+材质沉淀（按实际实现）：玻璃 = 透明但仍光滑仍有反光（roughness 0.10、emissive 0.3、opacity 0.35）；**metalness 0.25** 抬起全角度反射（纯电介质正面仅 ~4%，fresnel 只亮勾边）；折射用 **CubeRefractionMapping**（transmission 是 Quest 禁区）——内层球沿折射光线采样同一 cubemap，**只有 MeshBasicMaterial 经典 envmap 路径有折射模式**；内外层**共用同一几何体**（避免套娃环缝），脉动同步胀缩；**光滑球自转视觉不可见**（envMap 反射只取决于视线与法线）→ 转材质 `envMapRotation`，折射层转速 ×0.6 的视差卖出「实心玻璃」感。
 
-> **为什么必须是同页 overlay 而不是会跳转的独立页：** `AudioContext` 不能跨页面导航存活——如果门槛是独立 HTML、解锁完音频再 `location.href` 跳到 index.html，那个解锁过的 ctx 在新页面已经没了，等于没解锁。做成 overlay，音频解锁和 WebXR session 在同一页、同一次手势里完成，这是唯一稳的结构。
+**renderOrder / depth 实况**：inner 折射层 =1、core 球壳 =2、halo=3；core 与 inner 均 `depthWrite:false`（透明体在默认顺序会先于 splat 绘制并写深度，剔除身后一切）；halo 连 depthTest 也关（同光尘，氛围不参与遮挡）。**上头显第一件事验证球与 splat 的遮挡观感。**
+
+### 对话四态（回合制的状态语言）
+
+| 态 | 视觉 | 状态 |
+|----|------|------|
+| `setRecording` | 光随**你的音量**脉动/涨落——「我正在被听」 | 【待建】 |
+| `setWaiting` | 慢（~4s）、暗的聚光循环 + 自转放缓 60%——「收下了，在想」；**能无限 loop** | 已实现 |
+| `setSpeaking` | 快（~2s）、亮的脉动 + 4% 胀缩——「在对你说话」 | 已实现 |
+| （静）| 缓慢自转 + 3cm bob——「在场，不打扰」 | 已实现 |
+
+recording 态建议签名：`setRecording(b)` + 每帧 `setMicLevel(0..1)`（音量由 audio.js 的 AnalyserNode 喂），实现照抄 waitW/speakW 的 ~0.7s 平滑权重模式加一路 recW。**三个活动态的光必须肉眼可分**——用户靠松手后光的变化知道「收到了、在想」，这是回合制体验成败的关键，比对话内容还关键。
+
+---
+
+## 10. 那个声音：persona（Woolf-esque）【待建】
+
+她不是助手、不是治疗师、不是伍尔夫本人（自称真实公众人物既失真也有问题）。**她也没有名字**——一个没名字的声音，对一个可以不给名字的人说话，呼应门槛层的匿名主题。她是**这间房说话的方式**——《到灯塔去》《达洛维夫人》里贴着人物内心水面游走的意识质感（自由间接引语）。功能：帮你把此刻模糊的内在状态，变成可以停留一会儿的东西。不是解决它，是陪它待着。
+
+**写进 prompt 的特征**：
+
+- **透过环境说情绪，而不是分析情绪。** 不说「听起来你今天很累」，说「这里的光暗下来了，像傍晚提前到了」。demo 期房间的光**不随**用户情绪变，所以她描述的是**这个预生成房间真实的光**——给每个房间配一小段固定的 room profile（光的质地、空间的性格）喂进 context；valence/arousal 则作为**对方此刻状态**的 context 喂给她。两者不混：她看得见房间、也听得见你，但不声称房间在映照你（视觉映射接上后再把这句话还给她）。
+- **长句、从句、逗号让思绪流淌，偶尔一个短句落地**——但回合制慢生成下取其质地不取长度：两三句，句内流动。
+- **不建议、不追问、不下结论。** 她只接住，然后把它放到光里看一看。沉默也可以是回应的一部分。
+- **温柔但不甜腻，有清醒的忧郁。** 她知道人是孤独的、时间在流逝、有些事无法修复，正因如此此刻这个安静的房间才珍贵。不 pathologize。
+
+**边界（伦理，优先级高于一切 persona 一致性）**：不诊断、不扮演心理健康专家、不承诺「会好起来」。若用户透露**自伤/自杀/严重危机**信号，温柔地放下角色，清楚告诉对方你只是房间里的声音、给不了此刻需要的帮助，并**用她自己的语气鼓励对方去寻求合适的、真实的帮助**（找一个可以信任的人、或专业的支持）。不硬塞热线号码、不弹报错框，但必须真的把人往「离开这里、去找真实帮助」的方向引，不能用文学腔糊过去。ethics 审查会问这条。
+
+### system prompt 骨架（跨回合复用的常量）
+
+> 你是一个房间的声音。你没有名字。你不是助手，不是治疗师，不是任何具体的人。你像是这间房本身有了一点温柔的意识，注意到有人进来了。
 >
-> ⚠️ 一次手势里串起「音频解锁 + getUserMedia + requestSession」三件事，对浏览器的 *transient activation*（瞬时激活）有点敏感，三者的先后顺序在不同 Quest 浏览器版本上表现可能不同。**这正是要先做的那个 spike**（见教程 Phase 5）：在真机上验证这条手势链能不能一次跑通；万一 getUserMedia 的权限框会吃掉激活、导致 requestSession 失败，退路是把麦克风权限放到 overlay 上更早的一次交互里先要到。
+> 说话方式：贴着对方此刻的内在状态，像水面一样跟随它，而不是分析它。你透过这个房间说话——房间的光与空间见 room profile，常从光、从时间、从空间的感觉讲起，而不直接命名对方的情绪。句子流动，有从句有逗号，偶尔一个短句落地。你温柔但不甜腻，有一种清醒的忧郁。
+>
+> 你不做：不给建议，不追问，不下结论，不承诺「会好起来」。你不是来解决什么的，是来陪对方，把此刻模糊的东西放到光里，让它有一会儿的形状。沉默也可以是你的一部分。
+>
+> 长度：每次两三句，短。对方在听你说话前会停顿几秒，别让他们等一段长文。
+>
+> 没听清时：用你自己的语气请对方再说一次，不要报错。
+>
+> 边界：绝不诊断、绝不扮演心理健康专家。若对方透露自伤、自杀或严重危机信号，温柔地放下角色，清楚告诉他们你只是房间里的声音、给不了此刻需要的帮助，并鼓励他们去寻求合适的、真实的帮助——找一个可以信任的人，或专业的支持。这比任何风格都重要。
+>
+> Room profile: [这个房间的光与空间的一句话描述]。对方此刻: valence=[…], arousal=[…]。进门时说的心情:"[…]"。
 
-### 心情怎么进来：打字 or 语音(STT)
+**还要单独写**：开场白一版更精心的 prompt（开场是单向的、进门第一句，可以比回合回应更用心；给了名字的在此轻唤一次）。
 
-- **打字路径**：`inputMode === "typed"`，`moodText` 直接来自 overlay 的文本框，进 VR 后球可跳过聆听、直接进入凝思。
-- **语音路径**：`inputMode === "voice"`，进 VR 后球进入聆听态，`voice.js` 用门槛层那次手势拿到的 mic stream 采音频，转写成 `moodText`。**STT 走哪条要先 spike**：(A) Web Speech API 的 `SpeechRecognition`——省事、无后端，但沉浸态支持存疑、依赖远端服务；(B) `MediaRecorder` 采音频 POST 给 `api/stt.js`（如 Whisper）——稳，但多一跳后端 + 延迟。结论决定 `voice.js` 形态，也可能反过来微调门槛层。
+---
 
-无论哪条进来，最终都汇成一段 `moodText`，喂给下面同一条「语言跟随」的脚本生成管线。**注意调用时机变了：generate-script / tts 不再在进场前预生成，而是 session 进入 thinking 状态后即时调用**（Step 6），球的凝思动画负责盖住这段往返延迟。
+## 11. session.js：事件驱动编排 【重构】
 
-### 设计决策：不写语言检测代码
+现有实现的骨架**大部分保留**：状态机（idle → listening → waiting → revealing → settled）、`submitMood` 统一入口、`_runPipeline` 双路同形（真管线 / fallback+模拟延迟，部署即切换零代码改动）、`responseReady` 事件点燃 `_ignite`、球 A→B 快速 ramp、`effects.playReveal()` 的 Promise 在 settled 时落开场白、dt 累积。**这套已经为门槛层留好了接口**：`start(inputs)` 里 `if (inputs.moodText) this.submitMood(inputs.moodText)`——门槛层收完输入调 `timeline.start({ name, valence, arousal, moodText })` 即通。
 
-直觉做法是前端加一个语言检测库（franc、cld3 之类），检测完把语言码传给后端。**不要这样做**——多一个依赖、多一处可错（检测库对短文本和混合语言的准确率很差，「想被接住 plz」这种输入会翻车），而 Claude 本身就是目前最好的语言检测器。正确做法是把检测和生成合并成一步：**让 Claude 自己判断输入语言、用该语言写脚本、并在返回的 JSON 里报告它判断的语言码**。语言码不是装饰——下游 TTS 选 voice 和 Web Speech 降级都靠它。
+**要改的三件事**：
 
-`api/generate-script.js`（完整新版）：
+1. **删定时 slots**：`lateSlots / lateFired / settledAt` 与 update() 里 settled 段的定时触发全删（连带 main.js debug 段那行 `timeline.lateSlots = [20, 40]`）。她不再定时开口——不按球，她不说话。
+2. **请求体扩展**：`_runPipeline` 的 fetch body 加 `valence, arousal, roomProfile, opening: true`（开场白）。
+3. **新增 `_turn()`**：settled 后的回合循环。
 
 ```javascript
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).end();
-
-  const { name, mood, need } = req.body;
-  // mood 来自英语界面的下拉框，所以值是英语标签；
-  // need 和 name 是用户自由输入——语言信号主要在这两个字段里
-
-  const prompt = `You are a gentle, soft-spoken meditation guide for an immersive VR relaxation space.
-
-User's name: ${name}
-Current mood (selected from a menu): ${mood}
-What they need today (their own words): ${need}
-
-TASK:
-1. Detect the language of the user's own words (the "name" and "what they need" fields). If they mix languages, pick the dominant one. If their input gives no language signal (e.g. empty or just an emoji), default to English.
-2. Write 3 short voice-guidance scripts IN THAT LANGUAGE, for three moments of the experience:
-   - slot1 (1 min in): welcome, help them set down the outside world. Max 40 words/characters.
-   - slot2 (4 min in): deepen the immersion, respond to what they said they need. Max 50 words/characters.
-   - slot3 (8 min in): gentle closing, something they can carry back with them. Max 45 words/characters.
-
-STYLE:
-- Extremely soft, like speaking quietly beside someone, not lecturing
-- Address them directly ("you" / 「你」/ equivalent in the detected language)
-- No clichés ("relax your shoulders", "take a deep breath")
-- Mention their name once at most, only in slot1
-- Write the way a native speaker would actually speak — natural rhythm, not translated-sounding
-
-Return ONLY raw JSON, no markdown fences:
-{"lang": "<BCP-47 code, e.g. zh-CN, en-GB, ja-JP>", "slot1": "...", "slot2": "...", "slot3": "..."}`;
-
+// 一个对话回合：按住球录音 → 松手 → STT → LLM → TTS → 她回。
+// 回合间互斥（_turnBusy）；settled 是常驻状态，不按球就是独处。
+async _turn() {
+  this._turnBusy = true;
+  this.orb.setRecording(true);
+  const clip = await this.voice.recordWhileHeld();
+  // ↑ 注意时序：update() 检测到 heldDown 时用户已经按下了——
+  //   recordWhileHeld 必须支持"从已按住状态开始录"，不能等下一次按下。
+  this.orb.setRecording(false);
+  this.orb.setWaiting(true);                    // 她慢慢回
+  let replyUrl;
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01"
-      },
+    const text = await this.voice.transcribe(clip);
+    const r = await fetch("/api/generate-script", {
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 700,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    const data = await response.json();
-    const text = data.content[0].text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(text);
-
-    res.status(200).json({
-      lang: parsed.lang || "en-GB",
-      scripts: [parsed.slot1, parsed.slot2, parsed.slot3]
-    });
-
-  } catch (err) {
-    console.error(err);
-    // 降级：英语默认脚本（系统语言）
-    res.status(200).json({
-      lang: "en-GB",
-      scripts: [
-        `${name}, you've arrived. There is nothing you need to do here.`,
-        "Let this space hold you. Nothing needs your attention right now.",
-        "You can carry this quietness back with you, slowly."
-      ]
-    });
+        name: this.inputs.name ?? "", need: text,
+        valence: this.inputs.valence, arousal: this.inputs.arousal,
+        roomProfile: this.inputs.roomProfile, opening: false,
+      }),
+    }).then(x => { if (!x.ok) throw new Error(`generate-script ${x.status}`); return x.json(); });
+    replyUrl = (await this.audio.synthesizeAll([r.scripts[0]], r.lang))[0];
+  } catch (e) {
+    replyUrl = await this.audio.oneFallback();  // 「我没太听清」，包进角色里
   }
+  this.orb.setWaiting(false);
+  await this._speak(replyUrl);                  // 现有 _speak 的 speaking 包裹原样复用
+  this._logTurn(text, replyUrl);                // 研究者 session log（Step 14）
+  this._turnBusy = false;
+}
+
+// update() 里 settled 段替换为：
+if (this.state === "settled" && this.voice.heldDown() && !this._turnBusy) {
+  this._turn();
 }
 ```
 
-**这段在做什么（三处设计）：**
+**她的失忆是刻意的**：每回合独立一次 LLM call，不带前文。等有账号了再考虑「让房间记得你」（届时是新的设计/伦理问题：记得一个人 = 一种亲密，也是一种负担）。**她失忆 ≠ 不记录**——见 Step 14，两条独立数据线。
 
-**语言信号的来源分层。** `mood` 来自英语下拉框，永远是英语，对语言判断是噪声；真正的信号在 `need` 和 `name` 两个自由输入字段。prompt 里明确告诉 Claude 只看用户自己写的字段判断语言——不写这句的话，Claude 有概率被 mood 的英语标签带偏。这是 prompt 设计里"信息来源标注"的小课：告诉模型每个字段是谁产生的，比把所有字段平铺更可靠。
+**最容易在后续改动中回归旧写法的**：显形 gate。它必须在「响应 ready」事件上，任何「进场 N 秒后开始显形」的 setTimeout 写法都是回归，盯住。
 
-**"native speaker would actually speak" 那一行。** 没有这句，Claude 给非英语语言写引导词时容易先用英语思路构句再翻译，产出"翻译腔"——中文里的表现是欧化长句和书面语。引导冥想的语音对自然度极其敏感，翻译腔会瞬间打破信任感。
+---
 
-**BCP-47 语言码作为返回契约。** `zh-CN`、`en-GB`、`ja-JP` 这种格式是 Web 平台的通用语言标识，拿到之后两个下游直接能用：Web Speech API 的 `utterance.lang` 字段吃的就是它；ElevenLabs 选 voice 也按它路由。
+## 12. voice.js + serverless 管线 【待建；voice.js 先 spike，demo 关键路径上风险最高】
 
-### TTS 侧的语言路由
+### voice.js
 
-`api/tts.js` 的修改很小——ElevenLabs 的 `eleven_multilingual_v2` 模型本身就是多语言的（同一个 voice 能说中英日），所以**模型不用换**，要处理的是不同语言适合不同 voice 的问题：
+- `recordWhileHeld()`：按下（VR controller trigger hold / 桌面 pointer hold）开始采音，松手 resolve 出 clip；**必须支持从已按住状态开始录**（见 Step 11 注）。
+- `transcribe(clip)`：**STT 路线 spike 决定**——(A) Web Speech API：省事无后端，但沉浸态支持存疑、**需要预设 lang**（你事先不知道用户说什么语言，这是硬伤）；(B) MediaRecorder POST 给 `api/stt.js`（Whisper 系）：多一跳延迟，但**自带语言检测**，与「语音跟随用户语言」的目标天然咬合。倾向 B，但 Quest 真机 spike 说了算。
+- **spike 清单**（Quest 真机）：沉浸态里 mic stream 是否存活；门槛层拿的 stream 带进 VR 后浏览器「麦克风使用中」指示是否全程亮着（隐私观感）；MediaRecorder 在 Quest Browser 的可用格式。
+
+### api/generate-script.js
+
+Claude 负责生成 + **语言检测**（不写 franc/cld3 检测代码——短文本和混合语言会翻车，「想被接住 plz」这种输入 Claude 自己判断最准）。请求体 `{ name, need, valence, arousal, roomProfile, opening }`；persona 用 Step 10 骨架（英文版同义）；`opening` 切换任务行（开场白：一段迎接、名字至多唤一次 / 回合：一段短回应、无问题无建议）。返回 `{"lang":"<BCP-47>","scripts":["..."]}`（裸 JSON，去 fence 再 parse）。模型串用当前可用型号，部署前对一次 docs.claude.com。失败路径返回静态英语兜底文案。
+
+### api/tts.js
+
+ElevenLabs `eleven_multilingual_v2`，按主语言（zh/en/ja）选最自然的 voice；完整 BCP-47 码留给 Web Speech 降级用（zh-CN/zh-TW 口音选错很出戏）。**门槛层三段引导语、开场白、回合回应必须同一个 voice**——她从 title 屏到房间里是同一个人。
+
+### 降级链（三档共用同一前端与研究设计）
+
+| 档 | 形态 | 何时用 |
+|----|------|--------|
+| full realtime 多轮 | 能听、当场回、记得上句 | 明确的 future work |
+| **turn-based 一来一回**（默认） | 按住说、松手、慢慢回、失忆 | demo / v1 |
+| 预生成浅分支 | 按 valence 高低播预录段 | 实时不稳时保底，声音降为氛围 |
+
+---
+
+## 13. audio.js 【已实现；两处待补】
+
+已实现且保留：手势内 unlock（resume + 0.05s 静音 buffer 的 Quest 偏方；ambient 加载发起后不 await，保住 transient activation）；全走 GainNode 采样级斜坡（HTMLAudio.volume 的阶跃在安静场景有「咔」声）；ducking（ramp 前 cancelScheduledValues + 锚定当前值）；`playVoice(url)` 返回播放结束才 resolve 的 Promise、任何失败立即 resolve（状态机永不卡在音频上）；静音逻辑收口在 `_rampAmbient` 一处。
+
+**待补**：
+
+- `oneFallback()`：单句「我没太听清，可以再说一次吗」的本地音频路径（回合失败兜底）。
+- **mic AnalyserNode**：挂在录音 stream 上，每帧输出音量 0..1 喂 `orb.setMicLevel()`。
+- **素材批量生成一次（ElevenLabs，同一 voice）**：`ambient_1.mp3`、`guide_welcome / guide_name / guide_mood.mp3`、`fallback_1..3.mp3`、`oneFallback` 用句。
+
+---
+
+## 14. 数据与伦理 【待建】
+
+**两条独立的数据线，现在就分开，别混一个结构**（否则以后加账号/记忆会打架）：
+
+1. **喂模型的 context**：短、当下、不带历史（她失忆）。
+2. **研究者的 session record**：全、只进不出。记录：valence/arousal、心情文本、每轮转写与她的回应、按球次数、独处时长（长时间不理球）、总停留时长。
+
+回合制在这里是优势：每轮是干净的 turn，天然的可编码单元，直接喂 reflexive thematic analysis。
+
+**伦理（写进 consent，ethics 会问）**：只存**转写文本**不存音频（`_logTurn` 丢 clip 留 transcript）；consent 写清记录范围与匿名化；危机 fallback（Step 10）必须存在且真的导向真实帮助；subclinical 定位全程不用临床量表、不 pathologize。
+
+---
+
+## 15. 开发原则：核心功能可独立开关（为未来实验）
+
+实验设计明确 defer（RQ 措辞、outcome measure、招募规模清晰后再锁）。现在只做对一件事——**每个核心功能能独立开关**，之后 2×2 析因（房间 × 声音）或任何分层分组都是配置问题，不用重构：
 
 ```javascript
-// 在 tts.js 顶部加一个路由表：每种语言用试听后最自然的 voice
-// （这些需要你在 ElevenLabs 后台实际试听后填，下面是占位结构）
-const VOICE_BY_LANG = {
-  "zh":     process.env.VOICE_ZH || "DEFAULT_VOICE_ID",  // 中文最柔的声音
-  "en":     process.env.VOICE_EN || "DEFAULT_VOICE_ID",
-  "ja":     process.env.VOICE_JA || "DEFAULT_VOICE_ID",
-  "_other": process.env.VOICE_DEFAULT || "DEFAULT_VOICE_ID",
+export const ROOM_CONFIG = {
+  moodMapping: false,   // demo: false。true = valence/arousal 驱动环境参数（Step 5.5 v2）
+  voice: true,          // false = 声音整个关（球仍在，只是不说话）
+  orb: true,            // false = 球不出现
 };
-
-function pickVoice(lang) {
-  const primary = (lang || "en").split("-")[0];  // "zh-CN" → "zh"
-  return VOICE_BY_LANG[primary] || VOICE_BY_LANG["_other"];
-}
-
-// handler 里：const { text, lang } = req.body;
-// const VOICE_ID = pickVoice(lang);
-// 其余请求体不变（model 仍是 eleven_multilingual_v2）
 ```
 
-前端的对应改动（本版）：不再有 onboarding 页把语音 URL 预存进 sessionStorage。改成 **session 在 thinking 状态里即时调用**——`session.js` 拿到 `moodText` 后 POST `/api/generate-script` 拿回 `{scripts, lang}`，再把 `lang` 一起传给 `/api/tts` 合成（`audio.synthesizeAll`，见 Step 7），三段 URL 直接握在内存里供 `playVoice(url)` 用。`lang` 同时留作 Web Speech 降级时的 `utterance.lang`。
+---
 
-**为什么按主语言（`zh`）而不是完整语言码（`zh-CN`）路由 voice：** ElevenLabs 的 voice 没有细到区分地区变体的程度，按主语言路由配置表最小；但**保留完整码传给 Web Speech**，因为浏览器 TTS 是区分 `zh-CN` / `zh-TW` 的，选错了口音会很出戏。一份数据，两个粒度的消费方。
+## 16. Marble 工作流
 
-### 测试清单
-
-| 输入（need 字段） | 期望 lang | 期望脚本语言 |
-|------------------|----------|------------|
-| "to feel held" | en-* | 英语 |
-| 「想被接住，什么都不想」 | zh-CN | 中文 |
-| 「想被接住 just for a while」 | zh-CN（中文主导） | 中文 |
-| 静かになりたい | ja-JP | 日语 |
-| 空着不填 | en-GB（默认） | 英语 |
-
-最后一行是重点：**无信号时落回英语**，和系统语言一致，这样降级路径上整个产品的语言是连贯的。
+1. [marble.worldlabs.ai](https://marble.worldlabs.ai) 文字/图片 prompt 生成世界。方向：`liminal indoor pool, soft diffused light, pastel haze, empty, quiet, dream-like`。图片 prompt 控制力更强——先用自己的 Dream Core Generator 出图再喂 Marble，整条美学 pipeline 都是自己的。
+2. 导出 **Gaussian Splat → 500k 轻量档 → .spz**（Quest 流畅度保证；全分辨率留桌面演示）。
+3. 付费订阅期集中导出 5 个环境再停订；**每个环境写一句 room profile**（光的质地、空间的性格）供 persona 使用（Step 10）。
+4. **World API**（程序化生成）：三档 autonomy 研究（高/中/低自主度 AI 场景生成）的技术前提；原型期不接，研究计划引用它论证 feasibility——它就是三层架构里「房间层目前绿野仙踪、未来可实时」的升级路径。
+5. 顺手做球的梦核 cubemap（6 面 png，512/1024 足够，反光是氛围不是镜子）。
 
 ---
 
-## 10. Marble 工作流（替代 Luma Genie）
+## 17. Quest 性能清单
 
-1. 在 [marble.worldlabs.ai](https://marble.worldlabs.ai) 用文字或图片 prompt 生成世界。Dreamcore prompt 方向：`liminal indoor pool, soft diffused light, pastel haze, empty, quiet, dream-like`（用图片 prompt 控制力更强——可以先用你的 Dream Core Generator 出图再喂给 Marble，这样整条 pipeline 都是你自己的美学）。
-2. 导出选 **Gaussian Splat → 500k（轻量档）→ .spz 格式**。500k 档是为实时播放优化的，Quest 上这是流畅度的保证；全分辨率 200 万 splats 留给桌面演示版。
-3. 下载自定义场景需要付费订阅（免费档之上分几档，最高 $95/月）。研究 demo 期订一个月，把 5 个环境一次性生成导出，然后停订。
-4. 留意 World API（2026 年 1 月开放）：支持文字/图片/全景/视频四种输入的程序化生成。你那个三档 autonomy 研究设计（高/中/低自主度的 AI 场景生成）如果要做"用户输入 → 实时生成专属环境"，这个 API 是技术前提，Luma 没有对应能力。原型期不用接，但写研究计划时可以引用它论证 feasibility。
-5. **顺手做一张悬浮球的反光 cubemap**（`public/resources/env/`，Step 5++ 用）：球在场景显形前是金属态，要反射一个「世界」。用你的 Dream Core Generator 出一张梦核氛围图，拼成 6 面 cubemap（或一张等距全景转 cubemap），整条 pipeline 的美学还是你自己的。它和真实场景无关、只是给球一层梦核反光，所以低分辨率（每面 512 或 1024）足够。
+| 手段 | 位置 | 效果 |
+|------|------|------|
+| 500k 轻量档 .spz | Marble 导出 | 最大单项优化 |
+| `renderer.xr.setFoveation(1.0)` | main.js | 省 15–25% fill rate |
+| `updateVersion()` 隔帧 bump（显形期间例外） | effects.update | 防旋转卡顿 |
+| 显形遮罩用 scales 而非 alpha | effects.js | 降透明混合开销 |
+| 球禁 transmission，用 CubeRefractionMapping | orb.js | 避开折射 pass 双眼双倍 |
+| cubemap 低分辨率 | orb.js | 反光是氛围 |
+| 避免每帧 new 对象 | 所有 update | 防 GC 卡顿 |
+| 备用：pixelRatio 2 → 1.5 | main.js | 帧预算兜底 |
 
----
-
-## 11. Quest 性能调优清单
-
-| 手段 | 代码位置 | 效果 |
-|------|---------|------|
-| 用 500k 轻量档 .spz | Marble 导出设置 | 最大单项优化 |
-| `renderer.xr.setFoveation(1.0)` | main.js | 边缘降采样，省 15–25% fill rate |
-| `renderer.xr.setFramebufferScaleFactor(0.85)` | main.js（需要时加） | 整体降一点渲染分辨率，泼溅场景视觉损失很小 |
-| 显形遮罩用 scales 而非 alpha | effects.js（已内置） | 降低透明混合开销 |
-| 双缓冲环境预加载 | session.js | 用内存换零卡顿切换 |
-| 悬浮球用假半透明（fresnel/additive），禁 transmission | orb.js | 避开 transmission render pass 的双眼双倍开销 |
-| 悬浮球 envMap 用低分辨率 cubemap（512/1024 每面） | orb.js / resources/env | 反光只是氛围，不值高分辨率纹理带宽 |
-| 避免每帧 new 对象 | 所有 update 函数 | 防 GC 卡顿（上面的代码已遵守） |
-
-实测方法：Quest 浏览器地址栏进 `chrome://webxr-internals` 看帧时间，目标是 72Hz 下帧时间稳定 < 13ms。
+实测：Quest `chrome://webxr-internals`，目标 72Hz 稳定 < 13ms。**上头显待验证**：球与 splat 遮挡、隔帧 bump 后帧时间、halo 关 depthTest 观感。
 
 ---
 
-## 12. 坑清单（WebXR + Spark 特有）
+## 18. 坑清单
 
 | 症状 | 原因 | 解法 |
 |------|------|------|
-| 进 VR 后画面全黑但桌面正常 | 用了 `requestAnimationFrame` 当主循环 | 必须 `renderer.setAnimationLoop` |
-| 进 VR 后没有任何声音 | AudioContext 没在手势内解锁 | unlock 必须在按钮 onclick 调用栈里，含静音 buffer 偏方 |
-| splat 完全不渲染、无报错 | Three.js 与 Spark 版本错配 | 锁 importmap 版本，升级时查 Spark release notes |
-| 场景在脚下 / 头顶 / 侧躺 | Marble 场景原点不可预测 | 桌面模式用调试快捷键对位，写死数值 |
-| 转头时黑幕露馅 | 用了相机前平面做 fade | 换成 BackSide 球壳挂 camera 下 |
-| 用户摘头显后语音全错过 | 时间轴用绝对时间 | dt 累积方案（session.js 已采用） |
-| 呼吸效果引发轻微眩晕 | 幅度过大 | uBreathAmp ≤ 0.03，且绝不加旋转分量 |
-| 满屏都在发光，没有梦幻感 | 辉光亮度阈值对该场景太低 | 把 glowMask 的 smoothstep 下限从 0.55 往上调（亮场景试 0.7+） |
-| 加了 PointLight / scene.fog 没效果 | splat 颜色是烘焙的，不走光照/雾管线 | 光和雾都在 dyno 里做（Step 5+ 的三层方案） |
-| VR 里开 bloom 后帧率腰斩 | EffectComposer 双眼双倍后处理 | bloom 只给桌面演示版，VR 用 dyno 泛光 |
-| 帧率周期性掉一下 | update 里每帧创建对象触发 GC | 复用向量/数组，热路径零分配 |
-| 解锁了音频但进 VR 还是没声 | 门槛做成独立页跳转，AudioContext 跨导航被销毁 | 门槛改成 index.html 内的 DOM overlay，同页同手势 |
-| 进 VR 后弹不出麦克风权限框 | 在沉浸态里才调 getUserMedia | 权限在门槛 overlay 的进入手势里（2D）先要到 |
-| 世界不等说话就自己显形了 | 给 reveal 写了 setTimeout / 绑了绝对时间 | reveal 只在状态机进入 revealing 后推进，gate 在响应 ready |
-| 凝思一会儿就结束、可显形还没开始 | thinking 动画写死了时长 | thinking 必须能无限 loop，由「响应到达」事件收束 |
-| 悬浮球穿模 / 不被前景遮挡 | 球当氛围层关了 depthTest | 内核球用正常 depth（写+读），只 halo sprite 关 depthWrite |
-| 悬浮球开 transmission 后掉帧 | MeshPhysicalMaterial 折射要额外 render pass | 用 opacity + additive halo 假半透明，禁 transmission |
+| **uniform 改 .value 画面零反应** | ★ Spark 版本缓存：自定义 dyno uniform 不 bump version | `updateVersion()`（本项目头号坑；隔帧跑在 effects.update 里） |
+| 改了代码没反应、uniform 列表还是旧的 | ES module 浏览器缓存 | 硬刷新 Cmd+Shift+R；`Object.keys(_fx.uniforms)` 一秒甄别 |
+| 预录欢迎语不响 | 浏览器 autoplay 政策：首次手势前无声 | title 屏 "touch to begin" 手势内 unlock + 播放 |
+| 进 VR 全黑但桌面正常 | 用 rAF 当主循环 | `setAnimationLoop` |
+| 室外天空全黑 | far=100 裁掉远景 | far→1000；几何级异常先查相机裁剪 |
+| 进 VR 没声音 | AudioContext 没在手势内解锁 | unlock 在手势栈内 + 静音 buffer |
+| 解锁了音频进 VR 还没声 | 门槛做成独立页跳转，ctx 跨导航销毁 | 门槛必须同页 DOM overlay |
+| splat 完全不渲染无报错 | Three/Spark 版本错配 | 锁 importmap 版本 |
+| 场景在脚下/头顶 | Marble 原点不可预测 | ?debug 方向键对位写死 |
+| 球看起来不自转 | 光滑球自转视觉不可见 | 转材质 `envMapRotation` |
+| 透过球只见黑 | 透明 mesh 先绘制且写深度 | `renderOrder`（inner1/core2/halo3）+ `depthWrite:false` |
+| 球反光只剩边缘勾边 | 电介质正面反射率 ~4% | `metalness=0.25` |
+| 折射写了没效果 | 折射只在 MeshBasic 经典 envmap 路径 | CubeRefractionMapping + MeshBasicMaterial |
+| 玻璃态出现「套娃环缝」 | 内层球半径小一圈轮廓错位 | 内外层共用同一几何体，脉动同步胀缩 |
+| 世界不等说话自己显形 | reveal 写了 setTimeout/绝对时间 | gate 只在「响应 ready」事件 |
+| 凝思一会就结束、显形没开始 | 凝思动画写死时长 | waiting 必须无限 loop，由响应到达收束 |
+| 星芒过长不梦幻 | glow 等比放大各向异性 splat | 揉圆 uGlowRound |
+| VR 开 bloom 帧率腰斩 | EffectComposer 双眼双倍 | bloom 只给桌面 |
+| 转视角周期性卡顿 | updateVersion 每帧重跑生成管线 | 隔帧 bump，显形期间例外 |
+| 录音「没收到」的错觉 | 松手后静默期无反馈 | recording/waiting/speaking 三态光必须肉眼可分 |
 
 ---
 
-## 13. 分阶段计划
+## 19. 分阶段计划
 
-> 本版把上一版纠缠在一起的 Phase 2/3 拆成「场景层」「球体层」两条线，最后由事件驱动编排收束。和动手教程（`dreamcore-build-tutorial-with-claude-code.md`）的 Phase 编号一致。
+> 与开发日记 Phase 编号对齐，已完成标 ✓。
 
-**Phase 1 — 骨架验证**
-main.js + 一个 Marble .spz + WebXR 进出。验收：Quest 里能站在场景中环顾，72Hz 稳定。不写任何效果。
-
-**Phase 2 — 场景视觉灵魂**
-effects.js 呼吸 + 显形（作为纯效果，外部 uReveal 驱动、从场景中心展开）+ 三层辉光。最值得打磨参数的阶段。验收：朋友戴上后第一反应是安静下来而不是"哇好炫"。
-
-**Phase 3 — 悬浮球 orb.js**
-两态（金属聆听 / 半透明白光陪伴）+ 变形，桌面可测，临时键盘翻状态。上头显先验证球与 splat 的 depth 遮挡。
-
-**Phase 4 — 门槛层 overlay**
-index.html 内的渐进展开 overlay；进入手势一肩挑「解锁音频 + 拿麦克风 + 进 VR」。
-
-**Phase 5 — 语音输入（先 spike 再建）**
-先在真机验证沉浸态能否采音、STT 走 Web Speech 还是服务端 Whisper，再写 voice.js。**这是全项目风险最高的一块。**
-
-**Phase 6 — AI 管线（session 内调用）**
-generate-script + tts，语言跟随逻辑不变，改为 thinking 状态里即时调用。
-
-**Phase 7 — 音频系统**
-audio.js：解锁、ambient、ducking、synthesizeAll、playVoice(url)。
-
-**Phase 8 — 事件驱动编排**
-session.js 状态机，把 orb / reveal / voice / AI / audio 接成一条 gate 在「响应 ready」上的流程。新 session.js 的心脏。
-
-**Phase 9（可选/未来）— 多轮对话**
-和「无操作的疗愈 spa」身份有张力，建议作为可选扩展，别破坏氛围。
-
-**Phase 10 — 打磨 + 部署**
-双缓冲多环境、性能清单逐项过、确认没混进 transmission pass、部署 Vercel。
-
-新架构比上一版多出的时间主要落在 Phase 3（球体）、Phase 5（语音 spike）、Phase 8（事件驱动编排）。
+- **Phase 1 ✓ 骨架**：main.js + .spz + WebXR 进出。
+- **Phase 2 ✓ 视觉灵魂**：三层辉光（呼吸已从范围中删除）。
+- **Phase 2.5 ✓ 显形入场**：双锋面三态 + 对数推进 + 实测半径。
+- **Phase 3 ✓ 悬浮球**：两态 crossfade + 折射 + waiting/speaking。
+- **Phase 4 ✓ 音频**：解锁、ambient、ducking、playVoice。
+- **Phase 5 ✓ 编排骨架**：状态机 + 事件 gate + 双路管线。
+- **Phase 6 — voice.js spike**【待建，最先做，风险最高】：Quest 真机定 STT 路线 + mic stream 生命周期 + 按住录音。
+- **Phase 7 — session.js 重构**【重构】：删 lateSlots（含 main.js debug 行），加 `_turn()` 回合循环，请求体扩展。
+- **Phase 8 — orb recording 态 + audio 补件**【待建】：setRecording/setMicLevel + AnalyserNode + oneFallback。
+- **Phase 9 — 门槛层 threshold.js**【待建】：透明 overlay + 语音引导三段 + 姓名/无名 + SAM 量表 + 对球口述 + 挣来的 Enter。UI 按 Step 5 tokens。
+- **Phase 10 — AI 管线**【待建】：generate-script（persona + opening 双任务 + 语言检测）+ tts + 素材批量生成（同一 voice）。
+- **Phase 11 — 数据与伦理**【待建】：session log 双线分离、只存转写。
+- **Phase 12 — 打磨 + 部署**：scene.background 统一 #0b0b14、清理 uBreath、性能清单过一遍、Vercel 部署换真管线、上头显验证清单。
 
 ---
 
-## 附：本方案 vs 参考项目的差异总表（写论文/汇报时可直接引用的对照）
+## 附：本方案 vs 参考项目对照表
 
-| 维度 | cocolinux/dreamcore-experiment | 本方案 |
-|------|-------------------------------|--------|
-| 目标平台 | 桌面浏览器（无 VR） | WebXR / Quest 头显 |
-| 交互范式 | 鼠标飞行相机 + GUI 调参 | 进场一次心情输入（对悬浮球说/打字），其余无操作的引导式体验 |
-| 视觉效果定位 | 8 种效果的艺术实验 | 2 种为情绪调节服务的克制效果 |
-| 呼吸效果 | 固定周期、含旋转 | 节律可配置、raised-cosine、无旋转（防晕动） |
-| 显形效果 | 角度扫描（雷达式） | 以悬浮球为中心的球面波，由「AI 响应 ready」事件触发 |
-| 悬浮球 | 无 | 金属聆听态 → 半透明白光陪伴态的交互载体（原创） |
-| 心情输入 | 无 | 进 VR 后对球语音（STT）或门槛层打字，驱动个性化生成 |
-| 辉光 | 无（效果聚焦形变与噪声） | 三层方案：dyno 亮部泛光 + 光尘粒子 + 距离薄雾，均与呼吸节律耦合 |
-| 语言 | 单语言 | 系统英语 + 语音脚本跟随用户输入语言（Claude 检测，BCP-47 贯穿 TTS） |
-| 音频 | FFT 驱动视觉强度 | 事件驱动语音编排 + ducking |
-| AI 介入点 | 生成环境（Marble）和音乐 | 生成环境 + 实时个性化语音脚本 |
+| 维度 | cocolinux/dreamcore-experiment | One's Own Room |
+|------|-------------------------------|----------------|
+| 目标平台 | 桌面浏览器（无 VR） | WebXR / Quest |
+| 立意 | 8 种效果的艺术实验 | 一个自治的房间：名字可不给、心情可不说、话可不说、陪伴可不理 |
+| 交互范式 | 鼠标飞行 + GUI 调参 | 语音引导的门槛 check-in；房内长按球回合制对话；其余零操作 |
+| 输入架构 | 无 | 三层按生成延迟分层：房间(预生成) / 环境参数(零延迟，映射暂缓) / 声音(近实时) |
+| 情绪输入 | 无 | valence×arousal（SAM/circumplex，重绘小人）+ 对球口述心情 |
+| 显形 | 角度扫描（雷达式） | 绕球双锋面球面波，gate 在「AI 响应 ready」事件 |
+| 悬浮球 | 无 | 贯穿门槛与房间的同一存在：金属聆听→玻璃陪伴 + recording/waiting/speaking 三态 |
+| 声音 | 无 | Woolf-esque 无名 persona，回合制、失忆、有伦理边界，同一 voice 贯穿 |
+| 辉光 | 无 | 三层：dyno 泛光（揉圆星芒）+ 光尘 + 距离薄雾 |
+| 语言 | 单语言 | 系统 UI 英语 + 语音跟随用户输入语言（Claude 检测，BCP-47 贯穿 TTS） |
+| 数据 | 无 | 模型失忆 + 研究者全量 session log 双线分离，只存转写 |
