@@ -31,8 +31,10 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           text,
           model_id: MODEL_ID,
-          // Slightly high stability: a steady, unhurried read suits her.
-          voice_settings: { stability: 0.6, similarity_boost: 0.75 },
+          // High stability reads calmer and softer — gentler delivery was
+          // explicit user feedback (2026-07); guides are generated with the
+          // same settings so she is one voice throughout.
+          voice_settings: { stability: 0.75, similarity_boost: 0.75 },
         }),
       },
     );
