@@ -72,7 +72,9 @@ ones-own-room/
 │       └── audio/
 │           ├── ambient_1.mp3
 │           ├── guide_welcome.mp3         # "Welcome to One's Own Room — also, your own room."
-│           ├── guide_name.mp3            # "What may this room call you? You don't need a name here."
+│           ├── guide_name.mp3            # "What may this room call you? No name is fine, too."
+│           ├── guide_valence.mp3         # "How are you feeling right now? Pick the one that feels closest."
+│           ├── guide_arousal.mp3         # "And how much is stirring in you right now — quiet, or worked up? Pick again."
 │           ├── guide_mood.mp3            # "Hold the orb, and tell me how you are."
 │           └── fallback_1..3.mp3         # AI 管线失败时的英语兜底语音
 ├── js/
@@ -159,7 +161,7 @@ ones-own-room/
 
 **屏 3 · 心情（对球说）**。球回到主角位、比之前亮一点像在等待；播 `guide_mood.mp3`（"Hold the orb, and tell me how you are."）。**按住球（或宽容判定：按住屏幕任意处）= 录音**：`getUserMedia` 在这次按住的手势里申请；球进 recording 态，光随音量脉动；松手结束。底部角落两个极淡出口：**"not today"**（跳过，开场白退化为不带 context 的通用版）和一个小键盘图标（切到发光横线的多行打字版）。
 
-**屏 4 · Enter**。球安静下来；药丸按钮从雾里凝出（从模糊到清晰、从暗到亮，`--fade-slow`），宽字距 "ENTER"。**画满才显现**：名字（或无名）+ 两个量表 + 心情（说了/打了/明确跳过）都完成才出现——Enter 是被「完成 check-in」挣来的门槛，不是等出来的。悬停光晕轻微增强，不放大不弹跳。
+**屏 4 · Enter**（2026-07 真机反馈修正：**常驻按钮已取消**）。check-in 最后一项落定即自动渐隐进入——完成本身就是门槛，不再多要一次点击。药丸按钮仅作**兜底**保留在 DOM：requestSession/getUserMedia 需要瞬时用户激活，口述路径的转写延迟可能耗尽激活窗口，自动进入失败时按钮浮现、收一次新鲜手势重试。
 
 **房间内 HUD**：几乎为零。仅右下角保留 34px 背景音开关（已实现）；其余一切交互都在球上。
 
@@ -291,8 +293,8 @@ recording 态建议签名：`setRecording(b)` + 每帧 `setMicLevel(0..1)`（音
 **写进 prompt 的特征**：
 
 - **透过环境说情绪，而不是分析情绪。** 不说「听起来你今天很累」，说「这里的光暗下来了，像傍晚提前到了」。demo 期房间的光**不随**用户情绪变，所以她描述的是**这个预生成房间真实的光**——给每个房间配一小段固定的 room profile（光的质地、空间的性格）喂进 context；valence/arousal 则作为**对方此刻状态**的 context 喂给她。两者不混：她看得见房间、也听得见你，但不声称房间在映照你（视觉映射接上后再把这句话还给她）。
-- **长句、从句、逗号让思绪流淌，偶尔一个短句落地**——但回合制慢生成下取其质地不取长度：两三句，句内流动。
-- **不建议、不追问、不下结论。** 她只接住，然后把它放到光里看一看。沉默也可以是回应的一部分。
+- **像一位知心女性朋友，平实口语、不赶时间、不说废话**（2026-07 真机反馈修正：原「长句从句让思绪流淌」的写法生成出来太拗口）。伍尔夫的底色保留在**她注意什么**——光、时间、空间的感觉——而不在句式的缠绕上。短句欢迎。仍是两三句。
+- **不讲道理、不给步骤建议、不追问、不下结论；但必须接住原话**（2026-07 真机反馈修正：原「不建议」放宽为可以顺着对方的需求给温和的允许式回应，如「那就先什么都不做，在这儿坐一会儿」；且第一句必须明确回应对方具体说了什么，不许飘在房间氛围里自说自话——房间是佐料，不是答案）。沉默也可以是回应的一部分。
 - **温柔但不甜腻，有清醒的忧郁。** 她知道人是孤独的、时间在流逝、有些事无法修复，正因如此此刻这个安静的房间才珍贵。不 pathologize。
 
 **边界（伦理，优先级高于一切 persona 一致性）**：不诊断、不扮演心理健康专家、不承诺「会好起来」。若用户透露**自伤/自杀/严重危机**信号，温柔地放下角色，清楚告诉对方你只是房间里的声音、给不了此刻需要的帮助，并**用她自己的语气鼓励对方去寻求合适的、真实的帮助**（找一个可以信任的人、或专业的支持）。不硬塞热线号码、不弹报错框，但必须真的把人往「离开这里、去找真实帮助」的方向引，不能用文学腔糊过去。ethics 审查会问这条。
@@ -484,6 +486,8 @@ export const ROOM_CONFIG = {
 | 世界不等说话自己显形 | reveal 写了 setTimeout/绝对时间 | gate 只在「响应 ready」事件 |
 | 凝思一会就结束、显形没开始 | 凝思动画写死时长 | waiting 必须无限 loop，由响应到达收束 |
 | 星芒过长不梦幻 | glow 等比放大各向异性 splat | 揉圆 uGlowRound |
+| 暗色细节（门把手等）黑色翕动 | glow 的 scale 增幅被 drift 时变调制，亮 splat 胀缩交替遮盖暗细节（静止相机 diff 实测 72% 像素在变） | scale 用静态 mask，drift 只调颜色亮度（effects.js glowMaskStatic / glowMask 双 mask） |
+| 她描述的房间和眼前的不一样 | 换 env_*.spz 没同步 ROOM_PROFILE | main.js ROOM_PROFILE 必须随场景重写 |
 | VR 开 bloom 帧率腰斩 | EffectComposer 双眼双倍 | bloom 只给桌面 |
 | 转视角周期性卡顿 | updateVersion 每帧重跑生成管线 | 隔帧 bump，显形期间例外 |
 | 录音「没收到」的错觉 | 松手后静默期无反馈 | recording/waiting/speaking 三态光必须肉眼可分 |
