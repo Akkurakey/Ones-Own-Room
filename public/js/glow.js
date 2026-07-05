@@ -2,7 +2,8 @@ import * as THREE from "three";
 
 // Procedurally generate a soft radial-gradient sprite texture — white centre,
 // lavender mid, transparent edge — so no image asset is needed.
-function makeGlowTexture() {
+// Exported: orb.js reuses it for the companion-state halo.
+export function makeGlowTexture() {
   const size = 64;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
@@ -59,13 +60,15 @@ export function createGlowDust(scene, count = 180) {
 
   // elapsed: seconds from clock.getElapsedTime()
   // breath:  0..1 inhale phase — dust brightens on inhale (pass 0 until wired up)
-  function update(elapsed, breath) {
+  // gate:    0..1 master visibility — main.js feeds the reveal progress, so
+  //          the dust only inhabits as much world as has condensed
+  function update(elapsed, breath, gate = 1) {
     for (const s of sprites) {
       const { baseY, speed, phase, baseOp } = s.userData;
       s.position.y = baseY + Math.sin(elapsed * speed + phase) * 0.15;
       s.material.opacity =
         (baseOp + 0.1 * Math.sin(elapsed * speed * 0.7 + phase))
-        * (0.8 + 0.4 * breath);
+        * (0.8 + 0.4 * breath) * gate;
     }
   }
 
