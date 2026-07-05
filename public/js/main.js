@@ -2,8 +2,11 @@ import * as THREE from "three";
 import { SplatMesh } from "@sparkjsdev/spark";
 import { setupEffects } from "./effects.js";
 import { createGlowDust } from "./glow.js";
+import { createOrb } from "./orb.js";
 import { SessionTimeline } from "./session.js";
 import { AudioManager } from "./audio.js";
+import { VoiceRecorder } from "./voice.js";
+import { createThreshold } from "./threshold.js";
 
 // Append ?debug to the URL to enable first-person controls and splat-repositioning keys.
 const DEBUG = new URLSearchParams(location.search).has("debug");
@@ -18,7 +21,9 @@ document.body.appendChild(renderer.domElement);
 
 // ---------- Scene + camera rig ----------
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x050510);
+// Matches the UI token --room-bg so the threshold overlay dissolves
+// seamlessly into the pre-reveal void.
+scene.background = new THREE.Color(0x0b0b14);
 
 const camera = new THREE.PerspectiveCamera(
   70, window.innerWidth / window.innerHeight, 0.05, 1000
@@ -46,10 +51,42 @@ scene.add(splat);
 
 // ---------- Modules ----------
 const audio = new AudioManager();
+window._audio = audio;             // live testing: _audio.playVoice("./resources/audio/x.mp3")
 const effects = setupEffects(splat);
 window._fx = effects;              // live tuning: _fx.uniforms.uScale.value = 1.7
+// The threshold is the entry now, so the page opens on the pre-reveal void:
+// black nothing + the metal orb. (uReveal's shader default of 1 exists for
+// bare-scene tuning; force it back to 1 from the console when needed.)
+effects.uniforms.uReveal.value = 0;
 const dust = createGlowDust(scene);
-const timeline = new SessionTimeline({ scene, camera, splat, audio, effects });
+const orb = createOrb(scene);
+window._orb = orb;                 // live tuning: _orb.setState(1), _orb.setThinking(true)
+const voice = new VoiceRecorder();
+window._voice = voice;             // dev: _voice.getMicLevel(), _voice.heldDown()
+const timeline = new SessionTimeline({ scene, camera, splat, audio, effects, orb, voice });
+window._session = timeline;        // dev mood input: _session.submitMood("...")
+
+// ---------- Hold-to-talk input edge ----------
+// Desktop: hold the pointer anywhere on the canvas (design.md: the forgiving
+// hit target — holding the screen counts as holding the orb). VR: controller
+// trigger hold. session.js polls voice.heldDown() and ignores taps < 350 ms,
+// so the ?debug click that re-acquires pointer lock never triggers a turn.
+renderer.domElement.addEventListener("pointerdown", () => {
+  if (!renderer.xr.isPresenting) voice.press();
+});
+// Release on window, not canvas: the pointer may leave the canvas mid-hold.
+window.addEventListener("pointerup", () => voice.release());
+for (const i of [0, 1]) {
+  const controller = renderer.xr.getController(i);
+  controller.addEventListener("selectstart", () => voice.press());
+  controller.addEventListener("selectend", () => voice.release());
+  rig.add(controller);   // controllers ride the rig like the camera does
+}
+
+// Debug-key state target: the orb's A→B crossfade is meant to be driven with
+// an eased ramp by session.js; for desktop testing the loop lerps toward this.
+let orbStateTarget = null;
+let orbState = 0;
 
 // ---------- Reusable movement vectors — module scope, never allocated per frame ----------
 const _forward = new THREE.Vector3();
@@ -74,6 +111,10 @@ const _worldUp = new THREE.Vector3(0, 1, 0);
 
 const keys = new Set();  // currently held WASD keys
 
+// Debug key handlers must never eat keystrokes meant for the threshold's
+// name / mood text fields.
+const isTyping = (e) => /^(INPUT|TEXTAREA)$/.test(e.target?.tagName ?? "");
+
 if (DEBUG) {
   const { PointerLockControls } =
     await import("three/addons/controls/PointerLockControls.js");
@@ -87,7 +128,7 @@ if (DEBUG) {
   // WASD: track key state, XR-gated.
   const MOVE_KEYS = new Set(["w", "a", "s", "d"]);
   window.addEventListener("keydown", (e) => {
-    if (renderer.xr.isPresenting) return;
+    if (renderer.xr.isPresenting || isTyping(e)) return;
     if (MOVE_KEYS.has(e.key.toLowerCase())) keys.add(e.key.toLowerCase());
   });
   window.addEventListener("keyup", (e) => {
@@ -98,12 +139,25 @@ if (DEBUG) {
   // Arrow keys: splat repositioning, XR-gated.
   // X-axis offset removed: WASD walking covers horizontal placement.
   window.addEventListener("keydown", (e) => {
-    if (renderer.xr.isPresenting) return;
+    if (renderer.xr.isPresenting || isTyping(e)) return;
     if (e.key === "ArrowUp") splat.position.y -= 0.1;
     else if (e.key === "ArrowDown") splat.position.y += 0.1;
     else if (e.key === "ArrowLeft") splat.rotation.y -= Math.PI / 12;
     else if (e.key === "ArrowRight") splat.rotation.y += Math.PI / 12;
     else return;
+  });
+
+  // Orb state testing (temporary until session.js owns the state machine):
+  //   1 — listening (metal)      2 — toggle speaking pulse
+  //   3 — companion (fast ~2 s)  4 — toggle waiting loop
+  let orbSpeaking = false;
+  let orbWaiting = false;
+  window.addEventListener("keydown", (e) => {
+    if (renderer.xr.isPresenting || isTyping(e)) return;
+    if (e.key === "1") orbStateTarget = 0;
+    else if (e.key === "2") { orbSpeaking = !orbSpeaking; orb.setSpeaking(orbSpeaking); }
+    else if (e.key === "3") orbStateTarget = 1;
+    else if (e.key === "4") { orbWaiting = !orbWaiting; orb.setWaiting(orbWaiting); }
   });
 
   // XR session: release lock and disable desktop input handlers.
@@ -119,30 +173,62 @@ if (DEBUG) {
   });
 }
 
-// ---------- Enter-VR button ----------
-const btn = document.getElementById("vr-button");
+// ---------- Ambient toggle (bottom-right) ----------
+const ambientBtn = document.getElementById("ambient-toggle");
+ambientBtn.onclick = () => {
+  const on = audio.toggleAmbient();
+  ambientBtn.textContent = on ? "\u{1F50A}" : "\u{1F507}";
+};
+
+// ---------- Threshold → session handoff ----------
+// One sentence about THIS pre-generated world's light and character, fed to
+// the persona as context (design.md Step 10). In the demo the visuals never
+// follow the user's mood, so her words must describe what is actually there.
+// TODO: re-write when swapping env_*.spz.
+const ROOM_PROFILE =
+  "An empty indoor pool at dusk: pale turquoise water holding the last of the light, every edge softened by haze, the air still and quiet.";
 
 // navigator.xr is absent on some older browsers; ?? coalesces to a resolved
-// false so the button always enables rather than silently throwing.
+// false so the threshold always works rather than silently throwing.
 (navigator.xr?.isSessionSupported("immersive-vr") ?? Promise.resolve(false))
-  .then(async (ok) => {
-    btn.disabled = false;
-    btn.textContent = ok ? "Enter the Space" : "Experience in Browser";
+  .then((vrOk) => {
+    const threshold = createThreshold({
+      audio,
+      orb,
+      voice,
+      onEnter: async (inputs) => {
+        // Mic may still be unrequested (typed / "not today" paths skipped the
+        // hold) — ask now, inside the ENTER gesture, before the VR session
+        // starts so the dialog never appears mid-immersion. Denial is not
+        // fatal: holding the orb just does nothing (solitude by default).
+        if (!voice.stream) {
+          try {
+            await voice.init(audio.ctx);
+          } catch (e) {
+            console.warn("mic unavailable — conversation turns disabled", e);
+          }
+        }
 
-    btn.onclick = async () => {
-      // AudioContext must be created inside a user-gesture call stack.
-      await audio.unlock();
+        if (vrOk) {
+          const session = await navigator.xr.requestSession("immersive-vr", {
+            optionalFeatures: ["local-floor", "bounded-floor"],
+          });
+          renderer.xr.setSession(session);
+        }
 
-      if (ok) {
-        const session = await navigator.xr.requestSession("immersive-vr", {
-          optionalFeatures: ["local-floor", "bounded-floor"],
-        });
-        renderer.xr.setSession(session);
-      }
+        timeline.start({ ...inputs, roomProfile: ROOM_PROFILE });
+      },
+    });
+    window._threshold = threshold;   // dev: _threshold.skip("mood text")
 
-      btn.style.display = "none";
-      timeline.start();
-    };
+    // Debug shortcut: key 0 fills the whole check-in and enters immediately —
+    // room-side iteration shouldn't cost a full threshold walk per reload.
+    // (keydown counts as a user gesture, so audio can unlock from it.)
+    if (DEBUG) {
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "0" && !isTyping(e)) threshold.skip();
+      });
+    }
   });
 
 // ---------- Main loop ----------
@@ -172,7 +258,22 @@ renderer.setAnimationLoop(() => {
   }
 
   effects.update(elapsed);
-  dust.update(elapsed, 0);
+  // Dust visibility rides the reveal: none in the pre-reveal black, fading
+  // in as the world condenses. (uReveal defaults to 1 for desktop tuning.)
+  dust.update(elapsed, 0, effects.uniforms.uReveal.value);
+
+  // Smooth A→B ramp for the debug keys — rate 1.5/s reaches ~95% in 2 s,
+  // matching the fast transform session.js drives on "response ready".
+  // Disabled while a session runs so the keys can't fight the state machine.
+  if (orbStateTarget !== null && !timeline.running) {
+    orbState += (orbStateTarget - orbState) * Math.min(dt * 1.5, 1);
+    orb.setState(orbState);
+  }
+  // The orb's recording glow rides the live mic level; outside a hold the
+  // level is forced to zero so ambient room noise never makes it shimmer.
+  orb.setMicLevel(voice.heldDown() ? voice.getMicLevel() : 0);
+  orb.update(dt);
+
   timeline.update(dt);
 
   // SparkRenderer is auto-created by Spark on the first render call and handles
