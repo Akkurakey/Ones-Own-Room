@@ -18,11 +18,19 @@
 const GUIDE = {
   welcome: "./resources/audio/guide_welcome.mp3",
   name: "./resources/audio/guide_name.mp3",
+  valence: "./resources/audio/guide_valence.mp3",
+  arousal: "./resources/audio/guide_arousal.mp3",
   mood: "./resources/audio/guide_mood.mp3",
 };
 
-export function createThreshold({ audio, orb, voice, onEnter }) {
+export function createThreshold({ audio, orb, voice, onEnter, onFirstTouch }) {
   const root = document.getElementById("threshold");
+
+  // With the threshold shown as a WebXR dom-overlay, a controller trigger
+  // aimed at it must act as a DOM pointer only — preventDefault here stops
+  // the same squeeze from also firing the session's XR select (which main.js
+  // maps to voice.press for in-room turns).
+  root.addEventListener("beforexrselect", (e) => e.preventDefault());
   const veil = document.getElementById("t-veil");
   const screens = {
     title: document.getElementById("t-title"),
@@ -35,7 +43,7 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
 
   // The check-in record. null name / null moodText are legitimate answers,
   // not missing data — the whole threshold is built around that distinction.
-  const inputs = { name: null, valence: null, arousal: null, moodText: null };
+  const inputs = { name: null, valence: null, arousal: null, moodText: null, lang: null };
   let unlocked = false;
   let done = false;
 
@@ -69,6 +77,13 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
   screens.title.addEventListener("click", async () => {
     if (unlocked) return;
     unlocked = true;
+    // Immersive threshold: the session request must ride THIS gesture, so it
+    // fires before any await; audio unlock shares the same activation.
+    // When it succeeds the system keyboard can no longer appear, so the
+    // .immersive class hides the typing affordances (voice/skip remain).
+    Promise.resolve(onFirstTouch?.()).then((ok) => {
+      if (ok) root.classList.add("immersive");
+    });
     await audio.unlock();
     await speak(GUIDE.welcome);
     show("name");
@@ -91,6 +106,8 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
   function toScales() {
     nameInput.blur();
     show("valence");
+    // The manikins carry no text labels, so her question IS the explanation.
+    speak(GUIDE.valence);
   }
 
   // ---------- Screen 2: SAM scales ----------
@@ -99,7 +116,10 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
   // the figures carry the meaning (design.md Step 5.5).
   buildRow("t-valence-row", samValence, (v) => {
     inputs.valence = v;
-    setTimeout(() => show("arousal"), 450);   // let the pick's glow register
+    setTimeout(() => {
+      show("arousal");
+      speak(GUIDE.arousal);
+    }, 450);   // let the pick's glow register
   });
   buildRow("t-arousal-row", samArousal, (v) => {
     inputs.arousal = v;
@@ -173,6 +193,9 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
     orb.setWaiting(true);
     try {
       inputs.moodText = await voice.transcribe(clip.blob);
+      // The language they spoke at the door decides the opening's language
+      // outright — more deterministic than re-guessing from the transcript.
+      inputs.lang = voice.lastLang ?? null;
     } finally {
       orb.setWaiting(false);
     }
@@ -199,21 +222,32 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
     toEnter();
   });
 
-  // ---------- Screen 4: the earned ENTER ----------
-  function toEnter() {
-    if (done) return;
-    show("enter");
-  }
-
-  document.getElementById("t-enter-btn").addEventListener("click", async () => {
+  // ---------- Screen 4: automatic entry ----------
+  // The ENTER pill was cut after headset testing — once the check-in is
+  // resolved, the extra tap added nothing, so entry is automatic. The pill
+  // survives in the DOM as a lifeboat only: requestSession/getUserMedia need
+  // transient user activation, and on the spoken path the transcription
+  // round-trip can outlive that window. If onEnter throws, un-fade and
+  // surface the pill to collect one fresh gesture, then retry.
+  async function toEnter() {
     if (done) return;
     done = true;
     root.classList.add("gone");
-    // Overlay dissolves into the same void the world will bloom out of;
-    // remove it once faded so it can never intercept in-room input.
-    setTimeout(() => root.remove(), 1600);
-    await onEnter({ ...inputs });
-  });
+    try {
+      await onEnter({ ...inputs });
+      // Overlay dissolves into the same void the world will bloom out of.
+      // display:none (not remove) — when the threshold ran as a WebXR
+      // dom-overlay the session keeps referencing the root element.
+      setTimeout(() => { root.style.display = "none"; }, 1600);
+    } catch (e) {
+      console.warn("threshold: auto-enter failed — surfacing ENTER for a fresh gesture", e);
+      done = false;
+      root.classList.remove("gone");
+      show("enter");
+    }
+  }
+
+  document.getElementById("t-enter-btn").addEventListener("click", () => toEnter());
 
   // Dev shortcut (wired to a key in main.js under ?debug): fill everything
   // and go straight in — the threshold is a one-time flow, and room-side
@@ -227,7 +261,7 @@ export function createThreshold({ audio, orb, voice, onEnter }) {
     }
     Object.assign(inputs, { name: null, valence: 3, arousal: 3, moodText });
     root.classList.add("gone");
-    setTimeout(() => root.remove(), 1600);
+    setTimeout(() => { root.style.display = "none"; }, 1600);
     await onEnter({ ...inputs });
   }
 

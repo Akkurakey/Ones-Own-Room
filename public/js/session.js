@@ -92,6 +92,9 @@ export class SessionTimeline {
         valence: this.inputs.valence ?? null,
         arousal: this.inputs.arousal ?? null,
         roomProfile: this.inputs.roomProfile ?? "",
+        // Door language pins the opening only; each turn's speech carries its
+        // own language and Claude reads it from the words themselves.
+        lang: opening ? this.inputs.lang ?? "" : "",
         opening,
       }),
     });

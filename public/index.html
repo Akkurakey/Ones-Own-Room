@@ -48,6 +48,23 @@
       font-weight: 300;
       color: var(--room-text);
       transition: opacity var(--fade-slow) var(--ease-mist);
+      /* Controller-ray long-press (hold-to-talk) must never start a text
+         selection — on Quest a held trigger select-drags the guide text. */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    #threshold input, #threshold textarea {
+      user-select: text;                   /* typing still needs a caret */
+      -webkit-user-select: text;
+    }
+    /* Immersive (dom-overlay) threshold: no system keyboard in-headset, so
+       typing affordances hide; voice and the spoken/skip paths carry it. */
+    #threshold.immersive #t-name-input,
+    #threshold.immersive #t-keyboard,
+    #threshold.immersive #t-mood-text,
+    #threshold.immersive #t-mood-done {
+      display: none;
     }
     #threshold.gone { opacity: 0; }
 

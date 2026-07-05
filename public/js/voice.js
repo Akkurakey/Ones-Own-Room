@@ -107,10 +107,15 @@ export class VoiceRecorder {
         body: blob,
       });
       if (!r.ok) throw new Error(`stt ${r.status}`);
-      const { text } = await r.json();
-      console.log("[voice] transcript:", text);
+      const { text, lang } = await r.json();
+      // Detected language is kept on the side (return type stays string for
+      // existing callers). The threshold reads it so the language spoken at
+      // the door deterministically drives the opening's language.
+      this.lastLang = lang || null;
+      console.log("[voice] transcript:", text, "lang:", lang);
       return text;
     } catch {
+      this.lastLang = null;
       return "I need some quiet today";   // stub: pipeline runs without a backend
     }
   }
