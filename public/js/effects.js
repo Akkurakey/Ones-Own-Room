@@ -61,6 +61,10 @@ export function setupEffects(splatMesh) {
   // long spikes), 1 kneads it into a sphere (round dreamy halo).
   const uGlowRound = dyno.dynoFloat(0.5);
 
+  // Skeleton strength: how visibly the sparse point-cloud premonition of the
+  // room shows through the pre-reveal void (0 = classic pure black).
+  const uSkeleton = dyno.dynoFloat(1);
+
   splatMesh.objectModifier = dyno.dynoBlock(
     { gsplat: dyno.Gsplat },
     { gsplat: dyno.Gsplat },
@@ -114,9 +118,23 @@ export function setupEffects(splatMesh) {
         ),
       );
 
-      // glowMask: lower threshold (0.32) and wider band (→0.82) pulls in more
-      // splats with a gentler falloff. Adding 0.12 * drift makes the glow
-      // breathe spatially — patches wax and wane over time without flickering.
+      // Two masks, one number apart, because scale and colour must not share
+      // the drift: a drift-modulated SCALE makes bright splats swell/shrink
+      // over time, and any small dark feature between them (door handles,
+      // mouldings) gets alternately covered and uncovered — the "black
+      // shimmer on details" artifact confirmed by static-camera frame diffs
+      // (72% of pixels changing at rest; 0.85% with glow off). So:
+      //   glowMaskStatic (no drift) → geometry: boost + rounding
+      //   glowMask       (drifted)  → colour: overexposure + tint breathe on
+      // The light still waxes and wanes; the splats stop moving.
+      const glowMaskStatic = dyno.mul(
+        dyno.smoothstep(
+          dyno.dynoConst("float", 0.25),
+          dyno.dynoConst("float", 0.95),
+          lum,
+        ),
+        uGlow,
+      );
       const glowMask = dyno.mul(
         dyno.smoothstep(
           dyno.dynoConst("float", 0.25),
@@ -134,7 +152,7 @@ export function setupEffects(splatMesh) {
       //     dreamy halo. Boost is the original ×2.6 max, radius uncapped.
       const boost = dyno.add(
         dyno.dynoConst("float", 1.0),
-        dyno.mul(dyno.dynoConst("float", 1.6), glowMask),
+        dyno.mul(dyno.dynoConst("float", 1.6), glowMaskStatic),
       );
       const meanScale = dyno.dot(
         scales3,
@@ -147,7 +165,7 @@ export function setupEffects(splatMesh) {
       // glowMask can exceed 1 (it carries uGlow), so clamp the blend factor —
       // an extrapolating mix would overshoot the sphere into inverted shapes.
       const roundT = dyno.min(
-        dyno.mul(glowMask, uGlowRound),
+        dyno.mul(glowMaskStatic, uGlowRound),
         dyno.dynoConst("float", 1.0),
       );
       const newScales = dyno.mix(dyno.mul(scales3, boost), haloVec, roundT);
@@ -286,18 +304,94 @@ export function setupEffects(splatMesh) {
       const DUST_VEC = dyno.mul(dyno.dynoConst("vec3", [1, 1, 1]), uDustScale);
       const HIDDEN_VEC = dyno.dynoConst("vec3", [0.0005, 0.0005, 0.0005]);
 
+      // Skeleton: ~2% of hidden splats stay faintly visible as micro points —
+      // a sparse premonition of the room inside the pre-reveal void (the world
+      // is sensed, not shown; the real reveal then swallows it). Selection is
+      // a classic position hash so the subset is stable frame to frame; the
+      // points are half dust size and dimmed hard so the title stays readable.
+      const skelHash = dyno.fract(dyno.mul(
+        dyno.sin(dyno.add(
+          dyno.mul(x, dyno.dynoConst("float", 12.9898)),
+          dyno.mul(z, dyno.dynoConst("float", 78.233)),
+        )),
+        dyno.dynoConst("float", 43758.5453),
+      ));
+      // Highlight weighting for both density and brightness: bright splats
+      // (window, lamp, lit walls) are picked ~3x as often, so the skeleton
+      // sketches the room's light structure instead of a uniform star field.
+      const skelLum = dyno.smoothstep(
+        dyno.dynoConst("float", 0.30),
+        dyno.dynoConst("float", 0.85),
+        lum,
+      );
+      const skelEdge = dyno.sub(
+        dyno.dynoConst("float", 0.975),
+        dyno.mul(dyno.dynoConst("float", 0.045), skelLum),
+      );
+      const skelMask = dyno.mul(
+        dyno.mul(
+          dyno.smoothstep(
+            dyno.sub(skelEdge, dyno.dynoConst("float", 0.01)),
+            skelEdge,
+            skelHash,
+          ),
+          uSkeleton,
+        ),
+        hiddenMask,
+      );
+      // Full dust size (4 mm): anything smaller drops sub-pixel in-headset,
+      // where the 0.85 framebuffer scale eats small points first.
+      const SKEL_VEC = dyno.mul(
+        dyno.dynoConst("vec3", [1, 1, 1]),
+        uDustScale,
+      );
+      // Per-splat hidden appearance: invisible for most, a micro point for
+      // the skeleton subset.
+      const hiddenVec = dyno.mix(HIDDEN_VEC, SKEL_VEC, skelMask);
+
       const revealScales = dyno.mix(
         dyno.mix(dyno.splitGsplat(gsplat).outputs.scales, DUST_VEC, dustZone),
-        HIDDEN_VEC,
+        hiddenVec,
         hiddenMask,
       );
       // Dust is dimmed 35% so it reads as dormant; full brightness returns
       // exactly when the condense front restores full size.
+      //
+      // Skeleton brightness = base 0.2, pushed to 0.75 on highlights — the
+      // sparse points sketch the room's LIGHT structure (window, lamp), not a
+      // uniform star field. A slow ripple radiating from the orb centre
+      // modulates it ±35%: the void breathes faintly around her, and the
+      // ripple's outward direction quietly foreshadows the reveal itself.
+      const skelRipple = dyno.add(
+        dyno.dynoConst("float", 0.65),
+        dyno.mul(
+          dyno.dynoConst("float", 0.35),
+          dyno.sin(dyno.sub(
+            dyno.mul(dC, dyno.dynoConst("float", 1.4)),
+            dyno.mul(uTime, dyno.dynoConst("float", 0.9)),
+          )),
+        ),
+      );
+      const skelBright = dyno.mul(
+        dyno.mix(
+          dyno.dynoConst("float", 0.2),
+          dyno.dynoConst("float", 0.75),
+          skelLum,
+        ),
+        skelRipple,
+      );
       const revealRgb = dyno.mul(
         dyno.splitGsplat(gsplat).outputs.rgb,
-        dyno.sub(
-          dyno.dynoConst("float", 1.0),
-          dyno.mul(dyno.dynoConst("float", 0.35), dustZone),
+        dyno.mul(
+          dyno.sub(
+            dyno.dynoConst("float", 1.0),
+            dyno.mul(dyno.dynoConst("float", 0.35), dustZone),
+          ),
+          dyno.mix(
+            dyno.dynoConst("float", 1.0),
+            skelBright,
+            skelMask,
+          ),
         ),
       );
       gsplat = dyno.combineGsplat({ gsplat, scales: revealScales, rgb: revealRgb });
@@ -374,7 +468,7 @@ export function setupEffects(splatMesh) {
     return new Promise((resolve) => { revealResolve = resolve; });
   }
 
-  return {
+  const api = {
     update(elapsed) {
       uTime.value = elapsed;
 
@@ -447,15 +541,19 @@ export function setupEffects(splatMesh) {
       // triggers (the rotation stutter). The ambient drifts are far too slow
       // to read the difference at 30 Hz. Exception: while the reveal plays,
       // the front moves metres per frame, so it gets the full rate.
+      // (bumpEveryFrame is a device-side diagnostic — ?bump=1 — for testing
+      // whether the half-rate stepping reads as texture flicker in-headset.)
       frameCount += 1;
-      if (revealPhase !== null || frameCount % 2 === 0) {
+      if (api.bumpEveryFrame || revealPhase !== null || frameCount % 2 === 0) {
         splatMesh.updateVersion();
       }
     },
     playReveal,
+    bumpEveryFrame: false,
     uniforms: {
       uGlow, uBreath, uTime, uReveal, uDustScale, uDustLead,
-      uExposure, uHazeDensity, uHazeStrength, uGlowRound,
+      uExposure, uHazeDensity, uHazeStrength, uGlowRound, uSkeleton,
     },
   };
+  return api;
 }

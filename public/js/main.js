@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { SplatMesh } from "@sparkjsdev/spark";
+import { SplatMesh, SparkRenderer } from "@sparkjsdev/spark";
 import { setupEffects } from "./effects.js";
 import { createGlowDust } from "./glow.js";
 import { createOrb } from "./orb.js";
@@ -9,7 +9,17 @@ import { VoiceRecorder } from "./voice.js";
 import { createThreshold } from "./threshold.js";
 
 // Append ?debug to the URL to enable first-person controls and splat-repositioning keys.
-const DEBUG = new URLSearchParams(location.search).has("debug");
+const qp = new URLSearchParams(location.search);
+const DEBUG = qp.has("debug");
+
+// Numeric URL overrides for render/comfort tunables (?lift=0.4&glow=0&sort32=1…).
+// Always active, not ?debug-gated: absent params fall through to the shipped
+// defaults, and in-headset A/B iteration must not require code redeploys.
+const num = (k, d) => {
+  const v = parseFloat(qp.get(k));
+  return Number.isFinite(v) ? v : d;
+};
+const JIGGLE = num("jiggle", 0) > 0;
 
 // ---------- Renderer ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -17,6 +27,10 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
 renderer.xr.setFoveation(1.0);   // edge foveation saves ~15–25% fill-rate on Quest
+// 0.85² ≈ 28% fewer pixels per eye. Splats are soft gaussians, so the
+// resolution loss is near-invisible while the fill-rate saving is not.
+// Must be set before the session starts — it is baked into the XR layer.
+renderer.xr.setFramebufferScaleFactor(num("fb", 0.85));
 document.body.appendChild(renderer.domElement);
 
 // ---------- Scene + camera rig ----------
@@ -37,13 +51,32 @@ rig.add(camera);
 scene.add(rig);
 
 // Desktop eye height: local-floor XR provides real eye height automatically,
-// so we zero the rig on session start and restore it on session end.
+// so we drop the rig to the lift offset on session start and restore desktop
+// height on session end. The lift raises the viewpoint slightly above true
+// standing height — the room reads more open that way (headset feedback).
 const DESKTOP_EYE_HEIGHT = 1.6;
+const XR_RIG_LIFT = num("lift", 0.26);
 rig.position.y = DESKTOP_EYE_HEIGHT;
-renderer.xr.addEventListener("sessionstart", () => { rig.position.y = 0; });
+renderer.xr.addEventListener("sessionstart", () => { rig.position.y = XR_RIG_LIFT; });
 renderer.xr.addEventListener("sessionend", () => { rig.position.y = DESKTOP_EYE_HEIGHT; });
 
 // ---------- Splat ----------
+// Explicit SparkRenderer instead of Spark's auto-created default, so the
+// splat cost knobs can sit below their defaults (maxStdDev √8, radius 512).
+// Splats are drawn as alpha-blended quads: shrinking each quad's footprint
+// attacks overdraw, the dominant cost on Quest.
+const spark = new SparkRenderer({
+  renderer,
+  maxStdDev: Math.sqrt(num("std", 5)),   // quad area ≈ -37% vs default √8; tails are invisible anyway
+  maxPixelRadius: num("mpr", 256),       // cap the screen footprint of huge near-camera splats
+  minAlpha: num("ma", 2) / 255,          // skip fragments that cannot survive 8-bit output
+  // Diagnostic (?sort32=1): 32-bit sort precision vs packed 16-bit pairs.
+  // Tried as a fix for the VR texture flicker (2026-07) — did not resolve it,
+  // so it stays off by default; the flicker investigation is paused.
+  sort32: num("sort32", 0) > 0,
+});
+scene.add(spark);
+
 const splat = new SplatMesh({ url: "./resources/worlds/env_3.spz" });
 splat.position.y = 0.4;
 splat.rotation.y = 0;
@@ -58,7 +91,18 @@ window._fx = effects;              // live tuning: _fx.uniforms.uScale.value = 1
 // black nothing + the metal orb. (uReveal's shader default of 1 exists for
 // bare-scene tuning; force it back to 1 from the console when needed.)
 effects.uniforms.uReveal.value = 0;
-const dust = createGlowDust(scene);
+// ?glow=0 kills the glow layer's scale boost — the prime suspect for the
+// "dark details shimmer" artifact (bright neighbours swelling with the drift
+// wave alternately cover and uncover small dark features like door handles).
+effects.uniforms.uGlow.value *= num("glow", 1);
+// ?bump=1: updateVersion every frame instead of every other — diagnostic for
+// whether the 36 Hz stepping of the glow's colour drift reads as flicker in VR.
+effects.bumpEveryFrame = num("bump", 0) > 0;
+// ?skel=0 restores the classic pure-black void (skeleton premonition off).
+effects.uniforms.uSkeleton.value = num("skel", 1);
+// 120 (down from the 180 default): additive sprites are pure fill-rate, and
+// a third fewer is indistinguishable in-headset while buying frame budget.
+const dust = createGlowDust(scene, num("dust", 120));
 const orb = createOrb(scene);
 window._orb = orb;                 // live tuning: _orb.setState(1), _orb.setThinking(true)
 const voice = new VoiceRecorder();
@@ -184,18 +228,54 @@ ambientBtn.onclick = () => {
 // One sentence about THIS pre-generated world's light and character, fed to
 // the persona as context (design.md Step 10). In the demo the visuals never
 // follow the user's mood, so her words must describe what is actually there.
-// TODO: re-write when swapping env_*.spz.
+// MUST be re-written whenever env_*.spz is swapped — a stale profile makes
+// her describe a room the user cannot see (caught on-device 2026-07: she
+// spoke of pool water while the splat showed this bedroom).
 const ROOM_PROFILE =
-  "An empty indoor pool at dusk: pale turquoise water holding the last of the light, every edge softened by haze, the air still and quiet.";
+  "A quiet bedroom in soft lavender dusk: a tall double door, a small lamp glowing warm beside the bed, every edge softened by haze, nothing stirring.";
 
 // navigator.xr is absent on some older browsers; ?? coalesces to a resolved
 // false so the threshold always works rather than silently throwing.
 (navigator.xr?.isSessionSupported("immersive-vr") ?? Promise.resolve(false))
   .then((vrOk) => {
+    // Immersive threshold (dom-overlay spike): requested at "touch to begin",
+    // inside that first gesture, so the whole check-in floats in the black
+    // void + orb + skeleton instead of a browser window in the Quest home.
+    // If the browser grants the session but not the overlay, the DOM would be
+    // invisible in-headset and the user stranded — end it and stay 2D; the
+    // classic enter-VR-at-the-end path below still works unchanged.
+    async function startImmersiveThreshold() {
+      // Spike verdict (2026-07, Quest 3): Meta Quest Browser does not
+      // implement dom-overlay for immersive sessions (the spec and desktop
+      // Chrome do; even Meta's own emulator does). Requesting anyway costs a
+      // permission prompt that then visibly does nothing, so the attempt is
+      // gated behind ?imth=1 until Phase B (3D-built threshold) replaces it.
+      if (!vrOk || !(num("imth", 0) > 0)) return false;
+      try {
+        const session = await navigator.xr.requestSession("immersive-vr", {
+          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
+          domOverlay: { root: document.getElementById("threshold") },
+        });
+        if (!session.domOverlayState) {
+          console.warn("threshold: no dom-overlay support — staying on the 2D page");
+          await session.end();
+          return false;
+        }
+        renderer.xr.setSession(session);
+        console.log("threshold: immersive dom-overlay active,",
+          session.domOverlayState.type);
+        return true;
+      } catch (e) {
+        console.warn("threshold: immersive threshold unavailable", e);
+        return false;
+      }
+    }
+
     const threshold = createThreshold({
       audio,
       orb,
       voice,
+      onFirstTouch: startImmersiveThreshold,
       onEnter: async (inputs) => {
         // Mic may still be unrequested (typed / "not today" paths skipped the
         // hold) — ask now, inside the ENTER gesture, before the VR session
@@ -209,7 +289,9 @@ const ROOM_PROFILE =
           }
         }
 
-        if (vrOk) {
+        // Already presenting when the dom-overlay threshold succeeded — the
+        // same session carries straight into the room, no second transition.
+        if (vrOk && !renderer.xr.isPresenting) {
           const session = await navigator.xr.requestSession("immersive-vr", {
             optionalFeatures: ["local-floor", "bounded-floor"],
           });
@@ -239,6 +321,18 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
   const elapsed = clock.getElapsedTime();
+
+  // ?jiggle=1 (desktop only): synthetic head micro-motion — millimetre sway +
+  // sub-degree yaw at incommensurate frequencies. In VR the head never stops
+  // moving, which keeps Spark re-sorting every frame; a static desktop camera
+  // never triggers that machinery, so VR-only artifacts (sort popping) hide
+  // from desktop testing. This reproduces the modulator so temporal frame
+  // diffs can measure the flicker without a headset.
+  if (!renderer.xr.isPresenting && JIGGLE) {
+    rig.position.x = Math.sin(elapsed * 5.1) * 0.015;
+    rig.position.z = Math.sin(elapsed * 4.3) * 0.012;
+    rig.rotation.y = Math.sin(elapsed * 3.7) * 0.02;
+  }
 
   // First-person rig movement — desktop only.
   // renderer.xr.isPresenting is the authoritative guard; the key handlers
@@ -276,8 +370,8 @@ renderer.setAnimationLoop(() => {
 
   timeline.update(dt);
 
-  // SparkRenderer is auto-created by Spark on the first render call and handles
-  // sorting + updating splats automatically — no manual updateGenerator() needed.
+  // The explicit SparkRenderer above handles sorting + updating splats
+  // automatically — no manual updateGenerator() needed.
   renderer.render(scene, camera);
 });
 
