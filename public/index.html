@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>One's Own Room</title>
+  <style>
+    /* ---------- Design tokens (design.md Step 5) ----------
+       The threshold is an interface in fog: no solid fills, no shadows, no
+       card borders. Depth comes from light and haze only. */
+    :root {
+      --room-bg:        #0b0b14;                    /* deep blue-violet night */
+      --room-mist:      rgba(121, 119, 132, 0.35);
+      --room-text:      rgba(240, 236, 244, 0.92);  /* violet-warm white */
+      --room-text-dim:  rgba(240, 236, 244, 0.45);
+      --room-glow:      rgba(230, 210, 255, 0.55);
+      --room-line:      rgba(230, 210, 255, 0.30);
+      --font-serif:     ui-serif, "Georgia", "Songti SC", serif;
+      --ls-wide:        0.12em;
+      --ls-body:        0.06em;
+      --fade-slow:      1.4s;
+      --fade-fast:      0.6s;
+      --ease-mist:      cubic-bezier(0.4, 0.0, 0.2, 1);
+    }
+
+    body { margin: 0; overflow: hidden; background: var(--room-bg); }
+
+    #ambient-toggle {
+      position: fixed; bottom: 18px; right: 18px;
+      width: 34px; height: 34px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.75);
+      border: none; border-radius: 50%;
+      font-size: 0.85rem;
+      cursor: pointer; z-index: 10;
+      backdrop-filter: blur(8px);
+    }
+
+    /* ---------- Threshold overlay ----------
+       Fully transparent: the canvas behind it shows the void and the metal
+       orb — the orb IS the threshold's main visual. DOM carries only type
+       and input elements, floating above and below the orb. */
+    #threshold {
+      position: fixed; inset: 0; z-index: 20;
+      pointer-events: none;                /* screens opt back in when active */
+      font-family: var(--font-serif);
+      font-weight: 300;
+      color: var(--room-text);
+      transition: opacity var(--fade-slow) var(--ease-mist);
+      /* Controller-ray long-press (hold-to-talk) must never start a text
+         selection — on Quest a held trigger select-drags the guide text. */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    #threshold input, #threshold textarea {
+      user-select: text;                   /* typing still needs a caret */
+      -webkit-user-select: text;
+    }
+    /* Immersive (dom-overlay) threshold: no system keyboard in-headset, so
+       typing affordances hide; voice and the spoken/skip paths carry it. */
+    #threshold.immersive #t-name-input,
+    #threshold.immersive #t-keyboard,
+    #threshold.immersive #t-mood-text,
+    #threshold.immersive #t-mood-done {
+      display: none;
+    }
+    #threshold.gone { opacity: 0; }
+
+    /* Dim veil for the scale screens: the orb steps back without touching
+       its real parameters (design.md: DOM-side veil, never orb params). */
+    #t-veil {
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse at 50% 58%,
+                  rgba(11, 11, 20, 0.62) 0%, rgba(11, 11, 20, 0.30) 70%);
+      opacity: 0; transition: opacity var(--fade-slow) var(--ease-mist);
+    }
+    #t-veil.on { opacity: 1; }
+
+    /* One screen, one focus. Everything condenses out of the fog and
+       dissolves back into it — opacity only, no motion effects. */
+    .t-screen {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column; align-items: center;
+      opacity: 0;
+      transition: opacity var(--fade-slow) var(--ease-mist);
+      pointer-events: none;
+    }
+    .t-screen.active { opacity: 1; }
+    .t-screen.active :is(button, input, textarea, .sam-opt) { pointer-events: auto; }
+
+    /* Type: thin serif, small, wide-tracked, never bold — a quiet literary
+       register (the Woolf nod). */
+    .t-caption {
+      margin: 18vh 0 0; padding: 0 24px;
+      font-size: 1.02rem; letter-spacing: var(--ls-body);
+      color: var(--room-text); text-align: center;
+      text-shadow: 0 0 24px var(--room-glow);
+    }
+    .t-hint {
+      position: absolute; bottom: 24vh; left: 0; right: 0;
+      text-align: center;
+      font-size: 0.82rem; letter-spacing: var(--ls-wide);
+      color: var(--room-text-dim);
+    }
+
+    /* Screen 0 — title */
+    #t-title.active { pointer-events: auto; cursor: pointer; }
+    #t-title h1 {
+      margin: 16vh 0 0;
+      font-size: 1.7rem; font-weight: 300;
+      letter-spacing: var(--ls-wide);
+      text-shadow: 0 0 30px var(--room-glow);
+    }
+
+    /* Inputs: no boxes — one glowing hairline that brightens on focus. */
+    .t-line-input {
+      margin-top: 5vh; width: min(320px, 70vw);
+      background: none; border: none; outline: none;
+      border-bottom: 1px solid var(--room-line);
+      padding: 8px 4px; text-align: center;
+      font-family: var(--font-serif); font-size: 1.05rem;
+      letter-spacing: var(--ls-body); color: var(--room-text);
+      caret-color: var(--room-glow);
+      transition: border-color var(--fade-fast) var(--ease-mist),
+                  box-shadow var(--fade-fast) var(--ease-mist);
+    }
+    .t-line-input:focus {
+      border-color: var(--room-glow);
+      box-shadow: 0 10px 18px -14px var(--room-glow);
+    }
+
+    /* Whispers: not buttons — lines of text that can be chosen. */
+    .t-whisper {
+      background: none; border: none; cursor: pointer;
+      font-family: var(--font-serif); font-size: 0.82rem;
+      letter-spacing: var(--ls-body);
+      color: var(--room-text-dim);
+      text-decoration: underline;
+      text-underline-offset: 4px;
+      text-decoration-color: var(--room-line);
+      transition: color var(--fade-fast) var(--ease-mist);
+    }
+    .t-whisper:hover { color: var(--room-text); }
+    #t-noname { margin-top: 3vh; align-self: center; transform: translateX(9ch); }
+    @media (max-width: 600px) { #t-noname { transform: none; } }
+
+    .t-corner-l { position: absolute; bottom: 26px; left: 26px; }
+    .t-corner-r { position: absolute; bottom: 26px; right: 64px; }
+
+    /* SAM rows: five redrawn line manikins, 1px glow stroke, no fill, no
+       labels. The picked one floats up inside a soft halo; the rest dim. */
+    .t-sam {
+      margin-top: 6vh;
+      display: flex; gap: clamp(8px, 3vw, 26px);
+    }
+    .sam-opt {
+      width: clamp(48px, 10vw, 68px); height: auto;
+      opacity: 0.45; cursor: pointer;
+      transition: opacity var(--fade-fast) var(--ease-mist),
+                  transform var(--fade-fast) var(--ease-mist),
+                  filter var(--fade-fast) var(--ease-mist);
+    }
+    .sam-opt:hover { opacity: 0.8; }
+    .sam-opt.picked {
+      opacity: 1; transform: translateY(-7px);
+      filter: drop-shadow(0 0 10px var(--room-glow));
+    }
+    .sam-opt svg { display: block; width: 100%; height: auto; }
+    .sam-opt path, .sam-opt circle, .sam-opt line {
+      fill: none; stroke: var(--room-glow); stroke-width: 1.1;
+      stroke-linecap: round;
+    }
+
+    /* Screen 3 — mood. Hold anywhere on it to speak. */
+    #t-mood.active { pointer-events: auto; }
+    #t-mood-text {
+      margin-top: 5vh; width: min(380px, 76vw); height: 88px;
+      display: none; resize: none;
+      background: none; border: none; outline: none;
+      border-bottom: 1px solid var(--room-line);
+      padding: 8px 4px; text-align: center;
+      font-family: var(--font-serif); font-size: 0.98rem;
+      letter-spacing: var(--ls-body); color: var(--room-text);
+      caret-color: var(--room-glow);
+    }
+    #t-mood.typing #t-mood-text { display: block; }
+    #t-mood-done { display: none; margin-top: 2vh; }
+    #t-mood.typing #t-mood-done { display: inline; }
+
+    /* Screen 4 — the earned ENTER: frosted-glass pill condensing out of the
+       fog, from blurred and dark to clear and lit. Hover strengthens the
+       glow only — no scaling, no bouncing. */
+    #t-enter-btn {
+      margin-top: 52vh;
+      padding: 15px 52px;
+      background: rgba(240, 236, 244, 0.05);
+      border: 1px solid var(--room-line); border-radius: 999px;
+      backdrop-filter: blur(8px);
+      font-family: var(--font-serif); font-size: 0.95rem;
+      letter-spacing: 0.2em; color: var(--room-text);
+      cursor: pointer;
+      opacity: 0; filter: blur(6px);
+      transition: opacity var(--fade-slow) var(--ease-mist),
+                  filter var(--fade-slow) var(--ease-mist),
+                  box-shadow var(--fade-fast) var(--ease-mist);
+    }
+    .t-screen.active #t-enter-btn { opacity: 1; filter: blur(0); }
+    #t-enter-btn:hover { box-shadow: 0 0 26px -4px var(--room-glow); }
+  </style>
+</head>
+<body>
+  <button id="ambient-toggle" title="Toggle ambient sound">&#x1F50A;</button>
+
+  <!-- Threshold overlay: five progressive screens (design.md Step 5).
+       Content is populated / driven by js/threshold.js. -->
+  <div id="threshold">
+    <div id="t-veil"></div>
+
+    <section id="t-title" class="t-screen">
+      <h1>One's Own Room</h1>
+      <p class="t-hint">touch to begin</p>
+    </section>
+
+    <section id="t-name" class="t-screen">
+      <p class="t-caption">What may this room call you?</p>
+      <input id="t-name-input" class="t-line-input" type="text"
+             autocomplete="off" spellcheck="false" maxlength="40" />
+      <button id="t-noname" class="t-whisper">I don't need a name here</button>
+    </section>
+
+    <section id="t-valence" class="t-screen">
+      <p class="t-caption">How does this moment feel, from heavy to light?</p>
+      <div id="t-valence-row" class="t-sam"></div>
+    </section>
+
+    <section id="t-arousal" class="t-screen">
+      <p class="t-caption">And how much is stirring in you, from still to racing?</p>
+      <div id="t-arousal-row" class="t-sam"></div>
+    </section>
+
+    <section id="t-mood" class="t-screen">
+      <p class="t-caption">Hold the orb, and tell me how you are.</p>
+      <textarea id="t-mood-text" spellcheck="false"></textarea>
+      <button id="t-mood-done" class="t-whisper">that's how I am</button>
+      <p class="t-hint" id="t-mood-hint">press and hold anywhere, speak, let go</p>
+      <div class="t-corner-l"><button id="t-nottoday" class="t-whisper">not today</button></div>
+      <div class="t-corner-r"><button id="t-keyboard" class="t-whisper" title="type instead">&#x2328;</button></div>
+    </section>
+
+    <section id="t-enter" class="t-screen">
+      <button id="t-enter-btn">ENTER</button>
+    </section>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.178.0/examples/jsm/",
+      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/0.1.9/spark.module.js"
+    }
+  }
+  </script>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
