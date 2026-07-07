@@ -1,0 +1,41 @@
+{
+  "_comment": "Single source of truth for each pre-generated world. `profile` is spoken context for the persona — it MUST describe what is actually visible (she talks about THIS room's light). `bounds` clamps the camera rig's x/z (measure per room: ?debug, WASD to each wall, read _rig.position). `offsetY`/`rotationY` align the splat (debug arrow keys). env_2/4/5 profiles and bounds are PLACEHOLDERS — verify in-scene before using them in a study.",
+  "rooms": [
+    {
+      "id": 3,
+      "name": "lavender bedroom",
+      "file": "./resources/worlds/env_3.spz",
+      "offsetY": 0.4,
+      "rotationY": 0,
+      "profile": "A quiet bedroom in soft lavender dusk: a tall double door, a small lamp glowing warm beside the bed, every edge softened by haze, nothing stirring.",
+      "bounds": { "minX": -1.0, "maxX": 1.1, "minZ": -2.5, "maxZ": 2.0 }
+    },
+    {
+      "id": 2,
+      "name": "liminal pool (bounds unverified)",
+      "file": "./resources/worlds/env_2.spz",
+      "offsetY": 0.4,
+      "rotationY": 0,
+      "profile": "A vast, hushed indoor pool in pale violet haze: still turquoise water, concrete arches and columns, cool light drifting through the mist, no one else here.",
+      "bounds": { "minX": -4.0, "maxX": 4.0, "minZ": -6.0, "maxZ": 3.0 }
+    },
+    {
+      "id": 4,
+      "name": "schoolyard dusk (bounds unverified)",
+      "file": "./resources/worlds/env_4.spz",
+      "offsetY": 0.4,
+      "rotationY": 0,
+      "profile": "An empty schoolyard at dusk: a red-brick school with a clock tower, faded court lines underfoot, a basketball hoop by the fence, the whole sky a soft pink haze.",
+      "bounds": { "minX": -5.0, "maxX": 5.0, "minZ": -6.0, "maxZ": 6.0 }
+    },
+    {
+      "id": 5,
+      "name": "pink laundry (bounds unverified)",
+      "file": "./resources/worlds/env_5.spz",
+      "offsetY": 0.4,
+      "rotationY": 0,
+      "profile": "A tiny candy-pink laundry room: two washing machines resting quietly, painted flowers along the walls, a cushioned seat under the window, everything soft and doll-like.",
+      "bounds": { "minX": -1.5, "maxX": 1.5, "minZ": -2.0, "maxZ": 2.0 }
+    }
+  ]
+}

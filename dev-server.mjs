@@ -22,6 +22,24 @@ const API = {
 };
 
 const PUBLIC = new URL("./public", import.meta.url).pathname;
+const TOOLS = new URL("./tools", import.meta.url).pathname;
+
+// --- Researcher console relay (design.md: wizard-of-oz console) ---
+// Zero-dependency SSE + POST message bus between the headset page and the
+// console page. In-memory, local-only by design: Vercel serverless can't
+// hold SSE connections, so the console is a lab instrument that exists only
+// where this dev server runs. On the deployed site /ctl 404s and the
+// headset-side client silently disables itself.
+const ctlClients = { headset: new Set(), console: new Set() };
+function ctlBroadcast(to, msg) {
+  const payload = `data: ${JSON.stringify(msg)}\n\n`;
+  for (const res of ctlClients[to] ?? []) res.write(payload);
+}
+// Periodic comment-line ping keeps proxies/browsers from reaping idle streams.
+setInterval(() => {
+  for (const set of Object.values(ctlClients))
+    for (const res of set) res.write(":ping\n\n");
+}, 15000).unref();
 const MIME = {
   ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
   ".png": "image/png", ".jpg": "image/jpeg", ".mp3": "audio/mpeg",
@@ -29,7 +47,42 @@ const MIME = {
 };
 
 http.createServer(async (req, res) => {
-  const path = new URL(req.url, "http://x").pathname;
+  const url = new URL(req.url, "http://x");
+  const path = url.pathname;
+
+  // Console relay: subscribe (SSE) ...
+  if (path === "/ctl/events") {
+    const role = url.searchParams.get("role");
+    if (!ctlClients[role]) { res.writeHead(400); return res.end(); }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    res.write("retry: 2000\n\n");
+    ctlClients[role].add(res);
+    req.on("close", () => ctlClients[role].delete(res));
+    return;
+  }
+  // ... and publish (POST {to, type, ...} relayed verbatim to that role).
+  if (path === "/ctl/send" && req.method === "POST") {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    try {
+      const msg = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      ctlBroadcast(msg.to, msg);
+      res.writeHead(204);
+    } catch {
+      res.writeHead(400);
+    }
+    return res.end();
+  }
+  // The console page lives in tools/ (NOT public/), so it can never ship in
+  // a deploy — it only exists where this dev server runs.
+  if (path === "/console") {
+    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache" });
+    return res.end(readFileSync(join(TOOLS, "console.html")));
+  }
 
   // API routes — shim the Vercel res helpers the handlers use.
   if (API[path]) {
@@ -52,6 +105,11 @@ http.createServer(async (req, res) => {
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
   if (existsSync(file) && statSync(file).isDirectory()) file = join(file, "index.html");
   if (!existsSync(file)) { res.writeHead(404); return res.end("not found"); }
-  res.writeHead(200, { "Content-Type": MIME[extname(file)] ?? "application/octet-stream" });
+  res.writeHead(200, {
+    "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
+    // Quest Browser heuristically caches ES modules without this and then
+    // runs stale code across deploys/tunnel sessions — always revalidate.
+    "Cache-Control": "no-cache",
+  });
   res.end(readFileSync(file));
 }).listen(3000, () => console.log("One's Own Room dev server → http://localhost:3000"));

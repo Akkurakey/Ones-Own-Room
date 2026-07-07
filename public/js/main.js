@@ -3,10 +3,12 @@ import { SplatMesh, SparkRenderer } from "@sparkjsdev/spark";
 import { setupEffects } from "./effects.js";
 import { createGlowDust } from "./glow.js";
 import { createOrb } from "./orb.js";
+import { createWristMenu } from "./wristMenu.js";
 import { SessionTimeline } from "./session.js";
 import { AudioManager } from "./audio.js";
 import { VoiceRecorder } from "./voice.js";
 import { createThreshold } from "./threshold.js";
+import { initConsoleClient } from "./consoleClient.js";
 
 // Append ?debug to the URL to enable first-person controls and splat-repositioning keys.
 const qp = new URLSearchParams(location.search);
@@ -49,6 +51,7 @@ const camera = new THREE.PerspectiveCamera(
 const rig = new THREE.Group();
 rig.add(camera);
 scene.add(rig);
+window._rig = rig;                 // debug: read .position at each wall to measure ROOM_BOUNDS
 
 // Desktop eye height: local-floor XR provides real eye height automatically,
 // so we drop the rig to the lift offset on session start and restore desktop
@@ -57,8 +60,24 @@ scene.add(rig);
 const DESKTOP_EYE_HEIGHT = 1.6;
 const XR_RIG_LIFT = num("lift", 0.26);
 rig.position.y = DESKTOP_EYE_HEIGHT;
-renderer.xr.addEventListener("sessionstart", () => { rig.position.y = XR_RIG_LIFT; });
-renderer.xr.addEventListener("sessionend", () => { rig.position.y = DESKTOP_EYE_HEIGHT; });
+
+// The first frames of an XR session can draw the splat with stale shader
+// state — seen on-device (2026-07) as a full-screen flash while the session
+// starts, consistent with one frame of the fully-revealed room (uReveal's
+// shader default is 1). The room is a black void at that moment anyway, so
+// the splat sits out the transition; the loop hands it back shortly after.
+let splatGuard = 0;
+
+renderer.xr.addEventListener("sessionstart", () => {
+  rig.position.y = XR_RIG_LIFT;
+  splat.visible = false;
+  splatGuard = 0.5;   // seconds of session time before the splat returns
+});
+renderer.xr.addEventListener("sessionend", () => {
+  rig.position.y = DESKTOP_EYE_HEIGHT;
+  splatGuard = 0;
+  splat.visible = true;
+});
 
 // ---------- Splat ----------
 // Explicit SparkRenderer instead of Spark's auto-created default, so the
@@ -77,9 +96,17 @@ const spark = new SparkRenderer({
 });
 scene.add(spark);
 
-const splat = new SplatMesh({ url: "./resources/worlds/env_3.spz" });
-splat.position.y = 0.4;
-splat.rotation.y = 0;
+// ---------- Room registry ----------
+// rooms.json is the single source of truth per pre-generated world: splat
+// file + alignment, the room profile the persona speaks from, and the
+// walkable bounds. ?room=<id> selects (researcher console sets it); the
+// lavender bedroom stays the default.
+const ROOMS = (await fetch("./rooms.json").then((r) => r.json())).rooms;
+const ROOM = ROOMS.find((r) => r.id === num("room", 3)) ?? ROOMS[0];
+
+const splat = new SplatMesh({ url: ROOM.file });
+splat.position.y = ROOM.offsetY;
+splat.rotation.y = ROOM.rotationY;
 scene.add(splat);
 
 // ---------- Modules ----------
@@ -109,6 +136,8 @@ const voice = new VoiceRecorder();
 window._voice = voice;             // dev: _voice.getMicLevel(), _voice.heldDown()
 const timeline = new SessionTimeline({ scene, camera, splat, audio, effects, orb, voice });
 window._session = timeline;        // dev mood input: _session.submitMood("...")
+// Researcher console link (?ctl=1 + local dev-server only; dormant elsewhere).
+initConsoleClient({ room: ROOM, effects, camera, timeline });
 
 // ---------- Hold-to-talk input edge ----------
 // Desktop: hold the pointer anywhere on the canvas (design.md: the forgiving
@@ -119,7 +148,11 @@ renderer.domElement.addEventListener("pointerdown", () => {
   if (!renderer.xr.isPresenting) voice.press();
 });
 // Release on window, not canvas: the pointer may leave the canvas mid-hold.
+// pointercancel too — Quest Browser ends a long press with cancel (not up)
+// when it reads the hold as a selection/context gesture, and a missed release
+// left the recorder running until the next stray tap (on-device 2026-07).
 window.addEventListener("pointerup", () => voice.release());
+window.addEventListener("pointercancel", () => voice.release());
 for (const i of [0, 1]) {
   const controller = renderer.xr.getController(i);
   controller.addEventListener("selectstart", () => voice.press());
@@ -136,6 +169,12 @@ let orbState = 0;
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _worldUp = new THREE.Vector3(0, 1, 0);
+
+// VR locomotion tunables. Slower than the desktop 3.0 m/s: smooth translation
+// is pure vection in-headset, and 1.5 m/s is the comfortable end of it.
+// URL-overridable like the render knobs (?vspeed=2) for in-headset tuning.
+const VR_MOVE_SPEED = num("vspeed", 1.5);
+const STICK_DEADZONE = 0.15;   // resting sticks report small nonzero values
 
 // ---------- DEBUG: first-person controls (desktop only) ----------
 // PointerLockControls handles mouse look (yaw + pitch) on the camera.
@@ -194,14 +233,17 @@ if (DEBUG) {
   // Orb state testing (temporary until session.js owns the state machine):
   //   1 — listening (metal)      2 — toggle speaking pulse
   //   3 — companion (fast ~2 s)  4 — toggle waiting loop
+  //   5 — force-show the wrist menu at a fixed desktop pose (visual tuning)
   let orbSpeaking = false;
   let orbWaiting = false;
+  let wristShown = false;
   window.addEventListener("keydown", (e) => {
     if (renderer.xr.isPresenting || isTyping(e)) return;
     if (e.key === "1") orbStateTarget = 0;
     else if (e.key === "2") { orbSpeaking = !orbSpeaking; orb.setSpeaking(orbSpeaking); }
     else if (e.key === "3") orbStateTarget = 1;
     else if (e.key === "4") { orbWaiting = !orbWaiting; orb.setWaiting(orbWaiting); }
+    else if (e.key === "5") { wristShown = !wristShown; wristMenu.forceShow(wristShown); }
   });
 
   // XR session: release lock and disable desktop input handlers.
@@ -217,22 +259,50 @@ if (DEBUG) {
   });
 }
 
-// ---------- Ambient toggle (bottom-right) ----------
+// ---------- Ambient toggle (bottom-right) + VR wrist menu ----------
+// One handler serves both surfaces (DOM button and wrist menu), so their
+// icons can never drift out of sync across an enter/exit-VR round trip.
 const ambientBtn = document.getElementById("ambient-toggle");
-ambientBtn.onclick = () => {
-  const on = audio.toggleAmbient();
+function applyAmbient(on) {
   ambientBtn.textContent = on ? "\u{1F50A}" : "\u{1F507}";
-};
+  wristMenu.setAmbientOn(on);
+}
+ambientBtn.onclick = () => applyAmbient(audio.toggleAmbient());
+
+// Hold a controller's squeeze (grip) button and two icon beads appear above
+// that hand: A/X mutes the ambient bed, B/Y leaves the room. Release to hide.
+const wristMenu = createWristMenu({
+  renderer, rig, camera,
+  onAmbientToggle: () => applyAmbient(audio.toggleAmbient()),
+  // sessionend listeners already restore desktop eye height / controls.
+  onExit: () => renderer.xr.getSession()?.end(),
+});
+window._wrist = wristMenu;         // desktop dev: _wrist.press(0); headset tuning is URL-only (?wmaxis, ?wmdebug=1)
 
 // ---------- Threshold → session handoff ----------
 // One sentence about THIS pre-generated world's light and character, fed to
 // the persona as context (design.md Step 10). In the demo the visuals never
-// follow the user's mood, so her words must describe what is actually there.
-// MUST be re-written whenever env_*.spz is swapped — a stale profile makes
-// her describe a room the user cannot see (caught on-device 2026-07: she
-// spoke of pool water while the splat showed this bedroom).
-const ROOM_PROFILE =
-  "A quiet bedroom in soft lavender dusk: a tall double door, a small lamp glowing warm beside the bed, every edge softened by haze, nothing stirring.";
+// follow the user's mood, so her words must describe what is actually there
+// (caught on-device 2026-07: a stale profile had her speak of pool water
+// while the splat showed a bedroom). Lives in rooms.json with the rest of
+// the per-room facts — one file to edit when a world changes.
+const ROOM_PROFILE = ROOM.profile;
+
+// Walkable interior of THIS world — world-space metres for the rig's x/z,
+// clamped in the main loop. Values live in rooms.json (measured by walking
+// to each wall under ?debug and reading _rig.position; env_3 measured
+// 2026-07, others are placeholders).
+const ROOM_BOUNDS = { ...ROOM.bounds };
+window._bounds = ROOM_BOUNDS;      // live tuning: _bounds.maxZ = 3
+
+// Keeps every movement source (desktop WASD, VR thumbstick) inside the room.
+// Clamps x/z only: desktop y is a fixed eye height, and in XR y belongs to
+// local-floor. Physical walking moves the camera, not the rig, so it is out
+// of scope here — the Quest Guardian bounds it in the real room.
+function clampRigToBounds() {
+  rig.position.x = THREE.MathUtils.clamp(rig.position.x, ROOM_BOUNDS.minX, ROOM_BOUNDS.maxX);
+  rig.position.z = THREE.MathUtils.clamp(rig.position.z, ROOM_BOUNDS.minZ, ROOM_BOUNDS.maxZ);
+}
 
 // navigator.xr is absent on some older browsers; ?? coalesces to a resolved
 // false so the threshold always works rather than silently throwing.
@@ -349,6 +419,42 @@ renderer.setAnimationLoop(() => {
     if (keys.has("s")) rig.position.addScaledVector(_forward, -speed * dt);
     if (keys.has("a")) rig.position.addScaledVector(_right, -speed * dt);
     if (keys.has("d")) rig.position.addScaledVector(_right, speed * dt);
+    clampRigToBounds();
+  }
+
+  // VR thumbstick locomotion: translate the rig along the head's horizontal
+  // heading. Translation only — no rotation component (comfort constraint) —
+  // and always the rig, never the camera (the headset owns its transform).
+  // Sticks are independent of the trigger, so hold-to-talk is unaffected.
+  if (renderer.xr.isPresenting) {
+    let sx = 0, sy = 0;
+    for (const source of renderer.xr.getSession().inputSources) {
+      const axes = source.gamepad?.axes;
+      if (!axes) continue;
+      // xr-standard mapping puts the thumbstick on axes[2]/[3] (Quest Touch);
+      // two-axis devices (touchpad-only) fall back to [0]/[1].
+      sx += (axes.length > 2 ? axes[2] : axes[0]) || 0;
+      sy += (axes.length > 3 ? axes[3] : axes[1]) || 0;
+    }
+    const mag = Math.hypot(sx, sy);
+    if (mag > STICK_DEADZONE) {
+      // Both hands sum (usually only one stick is pushed); cap at unit deflection.
+      if (mag > 1) { sx /= mag; sy /= mag; }
+      camera.getWorldDirection(_forward);
+      _forward.y = 0;
+      _forward.normalize();
+      _right.crossVectors(_forward, _worldUp).normalize();
+      // Stick-up reads as negative y in xr-standard, hence the flip to forward.
+      rig.position.addScaledVector(_forward, -sy * VR_MOVE_SPEED * dt);
+      rig.position.addScaledVector(_right, sx * VR_MOVE_SPEED * dt);
+      clampRigToBounds();
+    }
+  }
+
+  // Hand the splat back once the XR transition has safely passed.
+  if (splatGuard > 0) {
+    splatGuard -= dt;
+    if (splatGuard <= 0) splat.visible = true;
   }
 
   effects.update(elapsed);
@@ -367,6 +473,7 @@ renderer.setAnimationLoop(() => {
   // level is forced to zero so ambient room noise never makes it shimmer.
   orb.setMicLevel(voice.heldDown() ? voice.getMicLevel() : 0);
   orb.update(dt);
+  wristMenu.update(dt);
 
   timeline.update(dt);
 

@@ -71,7 +71,7 @@ ones-own-room/
 │       │   └── {px,nx,py,ny,pz,nz}.png   # 悬浮球反射用梦核 cubemap（6 张 png）
 │       └── audio/
 │           ├── ambient_1.mp3
-│           ├── guide_welcome.mp3         # "Welcome to One's Own Room — also, your own room."
+│           ├── guide_welcome.mp3         # "Welcome to your own room."（2026-07 真机反馈：原双段句砍短）
 │           ├── guide_name.mp3            # "What may this room call you? No name is fine, too."
 │           ├── guide_valence.mp3         # "How are you feeling right now? Pick the one that feels closest."
 │           ├── guide_arousal.mp3         # "And how much is stirring in you right now — quiet, or worked up? Pick again."
@@ -159,11 +159,11 @@ ones-own-room/
 
 **屏 2 · 量表**。球退暗退小（`setState` 不动，DOM 侧压一层极淡遮罩即可，勿真改球参数）。五个**重绘的极简线条小人**横排悬浮（SAM 语义，见 Step 5.5）：1px 微光描边、无填充，valence 屏表情由低到高，arousal 屏用小人周围的振动线圈表现能量由静到动。悬停轻微变亮；选中者被柔光环包裹、微微上浮，其余更淡。整组上方一句衬线提示，小人下方**无文字标签**。两屏（或上下两组），各点一下。
 
-**屏 3 · 心情（对球说）**。球回到主角位、比之前亮一点像在等待；播 `guide_mood.mp3`（"Hold the orb, and tell me how you are."）。**按住球（或宽容判定：按住屏幕任意处）= 录音**：`getUserMedia` 在这次按住的手势里申请；球进 recording 态，光随音量脉动；松手结束。底部角落两个极淡出口：**"not today"**（跳过，开场白退化为不带 context 的通用版）和一个小键盘图标（切到发光横线的多行打字版）。
+**屏 3 · 心情（对球说）**。球回到主角位、比之前亮一点像在等待；播 `guide_mood.mp3`（"Hold the orb, and tell me how you are."）。**按住球（或宽容判定：按住屏幕任意处）= 录音**：`getUserMedia` 在 **arousal 选中的那次点击手势里**提前申请（2026-07 真机反馈修正：原「首次按住时申请」会把那次按住喂给权限弹窗，读作「要按两遍」），权限弹窗随屏 3 淡入出现，首次按住即直接录；hint 只做状态反馈（录音/转写/短按重试），操作指令只有 caption 和她的语音这一处。球进 recording 态，光随音量脉动；松手结束。底部角落两个极淡出口：**"not today"**（跳过，开场白退化为不带 context 的通用版）和一个小键盘图标（切到发光横线的多行打字版）。
 
 **屏 4 · Enter**（2026-07 真机反馈修正：**常驻按钮已取消**）。check-in 最后一项落定即自动渐隐进入——完成本身就是门槛，不再多要一次点击。药丸按钮仅作**兜底**保留在 DOM：requestSession/getUserMedia 需要瞬时用户激活，口述路径的转写延迟可能耗尽激活窗口，自动进入失败时按钮浮现、收一次新鲜手势重试。
 
-**房间内 HUD**：几乎为零。仅右下角保留 34px 背景音开关（已实现）；其余一切交互都在球上。
+**房间内 HUD**：几乎为零。仅右下角保留 34px 背景音开关（已实现）；其余一切交互都在球上。VR 侧的对应物是手柄菜单（Step 6）：按住抓取键才显现的静音/退出双珠，平时零 HUD 不变。
 
 ### SAM 小人重绘的一个学术注脚
 
@@ -204,6 +204,8 @@ export function applyMood(valence, arousal) {
 已跑通，要点与踩坑（细节见开发日记 Phase 1）：
 
 - **相机 rig 模型**：VR 里 camera 被头显接管，移动用户只动 rig（父节点）。桌面眼高 1.6m，XR local-floor 自动给真实眼高，session start/end 时切换 rig.position.y。
+- **移动与边界**：VR 手柄摇杆平移（头部朝向相对、死区 0.15、默认 1.5 m/s 可 `?vspeed=` 覆盖；纯平移无旋转分量，转身靠物理转头）。桌面 WASD 与 VR 摇杆共用 `ROOM_BOUNDS` 边界盒，只夹 rig 的 x/z——**换 env_*.spz 时与 ROOM_PROFILE 一起重测**（?debug 下走到墙边读 `_rig.position`）。
+- **手柄菜单**（wristMenu.js）：**按住抓取键（squeeze）**，该手上方浮现两个半透明玻璃小珠（球的迷你回声，无文字纯 icon）：下珠 ↔ A/X = 背景音静音，上珠 ↔ B/Y = 退出房间；**松开即隐**。squeeze 是 WebXR 一等事件（曾试过翻腕姿态检测，grip 轴向因设备而异不可靠，已弃）；与「按住球说话」同一套按住语言；A/B 只在按住时生效（误触免疫）；淡入淡出；双手对称；小珠锚定手柄上方 rig 空间垂直排列（不依赖 grip 轴向）。`?wmdebug=1` 常显排查；?debug 键 5 桌面强制显示调视觉。
 - **far=1000**：far=100 曾把室外天空裁成全黑——几何级异常（整片消失/变黑）先查相机和裁剪，再查材质混合。
 - **主循环必须 `setAnimationLoop`**：rAF 在 XR session 内不触发。
 - **`updateVersion()` 住在 effects.update() 里、隔帧 bump**（不在 main 循环里重复调用，见 Step 6 性能注）。
@@ -436,6 +438,15 @@ export const ROOM_CONFIG = {
 };
 ```
 
+### 15.5 研究者控制台（wizard-of-oz console）【已实现 2026-07】
+
+「房间层预生成、绿野仙踪式」的操作台落地：研究员在 PC 上换房间、实时调氛围参数、用姿态孪生监控头显视角。
+
+- **rooms.json 是每个世界的单一事实源**：`{ id, name, file, offsetY/rotationY(对位), profile(persona 台词素材，必须写实), bounds(行走边界) }`。main.js 按 `?room=<id>`（默认 3）加载；换/加房间只改这一个文件。env_2(泳池)/4(黄昏操场)/5(粉色洗衣房) 的 profile 已按截图写实，**bounds 仍是占位**——研究用前按流程实测（?debug 走墙读 `_rig.position`）。
+- **传输**：dev-server.mjs 内置零依赖 SSE+POST 中继（`GET /ctl/events?role=headset|console` + `POST /ctl/send`），内存态、**本地专属**——Vercel serverless 撑不住长连接，这是刻意的：控制台是实验室仪器，不是产品面。部署环境里头显侧 consoleClient（`?ctl=1` 启用）探测不到 /ctl 即静默休眠，零影响。
+- **能力**：换房间（会话前选定，头显自动重载）；实时调 uExposure/uGlow/uHazeDensity/uHazeStrength/uGlowRound（全是现有活 uniform，冷暖仍按 5.5 推后）；**姿态孪生**——头显 10Hz POST 头部位姿（Quest 侧≈零成本，帧预算不动），控制台用同一 spz 资源自渲染头显视角、lerp 插值到显示帧率，且跟随换房。真实像素需求用 Quest 自带投屏兜底。
+- **页面**：`tools/console.html`，dev-server 路由 `/console`；在 tools/ 而非 public/ = 永不部署。UI 纯功能风，不入梦核美学。
+
 ---
 
 ## 16. Marble 工作流
@@ -487,7 +498,7 @@ export const ROOM_CONFIG = {
 | 凝思一会就结束、显形没开始 | 凝思动画写死时长 | waiting 必须无限 loop，由响应到达收束 |
 | 星芒过长不梦幻 | glow 等比放大各向异性 splat | 揉圆 uGlowRound |
 | 暗色细节（门把手等）黑色翕动 | glow 的 scale 增幅被 drift 时变调制，亮 splat 胀缩交替遮盖暗细节（静止相机 diff 实测 72% 像素在变） | scale 用静态 mask，drift 只调颜色亮度（effects.js glowMaskStatic / glowMask 双 mask） |
-| 她描述的房间和眼前的不一样 | 换 env_*.spz 没同步 ROOM_PROFILE | main.js ROOM_PROFILE 必须随场景重写 |
+| 她描述的房间和眼前的不一样 | 换房间没同步 profile | rooms.json 单一事实源：file/profile/bounds/对位 同一条目一起改（Step 15.5） |
 | VR 开 bloom 帧率腰斩 | EffectComposer 双眼双倍 | bloom 只给桌面 |
 | 转视角周期性卡顿 | updateVersion 每帧重跑生成管线 | 隔帧 bump，显形期间例外 |
 | 录音「没收到」的错觉 | 松手后静默期无反馈 | recording/waiting/speaking 三态光必须肉眼可分 |

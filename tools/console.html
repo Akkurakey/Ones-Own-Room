@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>One's Own Room — researcher console</title>
+<!-- Lab instrument, not part of the experience: plain functional UI on
+     purpose. Served ONLY by dev-server.mjs at /console (lives in tools/,
+     never deployed). Talks to the headset page via the /ctl SSE+POST relay. -->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 20px; background: #16161d; color: #d7d7e0;
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  fieldset {
+    border: 1px solid #33333f; border-radius: 6px; padding: 12px 16px;
+    min-width: 300px; margin: 0 0 16px;
+  }
+  legend { padding: 0 6px; color: #9a9ab0; }
+  label { display: block; margin: 10px 0 2px; color: #9a9ab0; }
+  input[type="range"] { width: 260px; vertical-align: middle; }
+  .val { display: inline-block; width: 56px; text-align: right; }
+  select, button {
+    background: #22222c; color: #d7d7e0; border: 1px solid #44445a;
+    border-radius: 4px; padding: 5px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: #7a7aa0; }
+  #status { margin-bottom: 14px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         background: #d9534f; margin-right: 6px; vertical-align: baseline; }
+  .dot.ok { background: #5cb85c; }
+  #twin { width: 640px; height: 360px; background: #0b0b14; border: 1px solid #33333f;
+          border-radius: 6px; display: none; }
+  small { color: #6d6d80; }
+</style>
+</head>
+<body>
+<h1>One's Own Room — researcher console</h1>
+
+<div id="status">
+  <span class="dot" id="relay-dot"></span>relay:&nbsp;<span id="relay-state">connecting…</span>
+  &nbsp;&nbsp;<span class="dot" id="hs-dot"></span>headset:&nbsp;<span id="hs-state">not seen</span>
+  &nbsp;&nbsp;room:&nbsp;<span id="hs-room">–</span>
+  &nbsp;&nbsp;session:&nbsp;<span id="hs-session">–</span>
+</div>
+
+<div class="row">
+  <fieldset>
+    <legend>room (applies pre-session; reloads the headset page)</legend>
+    <select id="room-select"></select>
+    <button id="room-apply">apply &amp; reload headset</button>
+    <p><small>bounds/profile for env_2/4/5 are placeholders — verify before a study (rooms.json)</small></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>atmosphere (live)</legend>
+    <div id="sliders"></div>
+    <p><small>values echo back from the headset after each change</small></p>
+  </fieldset>
+</div>
+
+<fieldset>
+  <legend>pose-twin monitor <button id="twin-toggle">start</button>
+    <small id="twin-info"></small></legend>
+  <canvas id="twin"></canvas>
+</fieldset>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/0.1.9/spark.module.js"
+  }
+}
+</script>
+<script type="module">
+// ---------- relay ----------
+const send = (msg) => fetch("/ctl/send", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(msg),
+}).catch(() => {});
+const toHeadset = (msg) => send({ to: "headset", ...msg });
+
+const $ = (id) => document.getElementById(id);
+let lastPoseAt = 0;
+let headsetRoom = null;
+
+// ---------- sliders (match the headset's PARAMS map in consoleClient.js) ----------
+const SLIDERS = [
+  { key: "exposure",     min: 0,    max: 2,   step: 0.05,  def: 0.9 },
+  { key: "glow",         min: 0,    max: 3,   step: 0.05,  def: 0.8 },
+  { key: "hazeDensity",  min: 0,    max: 0.2, step: 0.005, def: 0.04 },
+  { key: "hazeStrength", min: 0,    max: 1,   step: 0.02,  def: 0.6 },
+  { key: "glowRound",    min: 0,    max: 1,   step: 0.02,  def: 0.5 },
+];
+for (const s of SLIDERS) {
+  const label = document.createElement("label");
+  label.textContent = s.key;
+  const input = document.createElement("input");
+  Object.assign(input, { type: "range", min: s.min, max: s.max, step: s.step, value: s.def, id: `sl-${s.key}` });
+  const val = document.createElement("span");
+  val.className = "val";
+  val.id = `v-${s.key}`;
+  val.textContent = s.def;
+  input.addEventListener("input", () => {
+    val.textContent = input.value;
+    toHeadset({ type: "setParam", key: s.key, value: Number(input.value) });
+  });
+  $("sliders").append(label, input, val);
+}
+
+// ---------- rooms ----------
+const ROOMS = (await fetch("/rooms.json").then((r) => r.json())).rooms;
+for (const r of ROOMS) {
+  const opt = document.createElement("option");
+  opt.value = r.id;
+  opt.textContent = `${r.id} — ${r.name}`;
+  $("room-select").append(opt);
+}
+$("room-apply").onclick = () =>
+  toHeadset({ type: "setRoom", id: Number($("room-select").value) });
+
+// ---------- inbound events ----------
+const es = new EventSource("/ctl/events?role=console");
+es.onopen = () => {
+  $("relay-dot").classList.add("ok");
+  $("relay-state").textContent = "connected";
+  toHeadset({ type: "hello" });   // ask any live headset for a status report
+};
+es.onerror = () => {
+  $("relay-dot").classList.remove("ok");
+  $("relay-state").textContent = "reconnecting…";
+};
+es.onmessage = (e) => {
+  let msg;
+  try { msg = JSON.parse(e.data); } catch { return; }
+  if (msg.type === "status") {
+    $("hs-dot").classList.add("ok");
+    $("hs-state").textContent = "connected";
+    $("hs-room").textContent = msg.room;
+    $("hs-session").textContent = msg.state ?? "–";
+    headsetRoom = msg.room;
+    for (const [k, v] of Object.entries(msg.params ?? {})) {
+      const el = $(`sl-${k}`);
+      if (el) { el.value = v; $(`v-${k}`).textContent = (+v).toFixed(3); }
+    }
+  } else if (msg.type === "pose") {
+    lastPoseAt = performance.now();
+    headsetRoom = msg.room;
+    twinTarget(msg.p, msg.q);
+  }
+};
+// Headset liveness: poses arrive at 10 Hz while the link is up.
+setInterval(() => {
+  const fresh = performance.now() - lastPoseAt < 3000;
+  $("hs-dot").classList.toggle("ok", fresh);
+  if (!fresh && lastPoseAt) $("hs-state").textContent = "stale";
+}, 1000);
+
+// ---------- pose-twin monitor ----------
+// The console renders its OWN copy of the room (same splat asset) and slaves
+// a camera to the headset's reported pose — true pixels stay on the Quest
+// (its frame budget is sacred); this is the digital-twin view. 10 Hz samples
+// are lerped up to display rate so the motion reads smooth.
+let twin = null;
+let twinRoom = null;
+const targetP = [0, 1.6, 0];
+const targetQ = [0, 0, 0, 1];
+function twinTarget(p, q) {
+  if (!p || !q) return;
+  targetP.splice(0, 3, ...p);
+  targetQ.splice(0, 4, ...q);
+  // Follow the headset across room switches (poses carry the room id, so a
+  // reloaded headset re-syncs the twin automatically).
+  if (twin && headsetRoom !== null && headsetRoom !== twinRoom) {
+    twinLoadRoom(headsetRoom);
+  }
+}
+
+function twinLoadRoom(id) {
+  const room = ROOMS.find((r) => r.id === id) ?? ROOMS[0];
+  twinRoom = room.id;
+  if (twin.splat) {
+    twin.scene.remove(twin.splat);
+    twin.splat.dispose?.();
+  }
+  twin.splat = new twin.SplatMesh({ url: room.file });
+  twin.splat.position.y = room.offsetY;
+  twin.splat.rotation.y = room.rotationY;
+  twin.scene.add(twin.splat);
+  $("twin-info").textContent = ` room ${room.id}`;
+}
+
+$("twin-toggle").onclick = async () => {
+  if (twin) return;
+  $("twin-toggle").disabled = true;
+  $("twin-info").textContent = " loading splat…";
+  const THREE = await import("three");
+  const { SplatMesh, SparkRenderer } = await import("@sparkjsdev/spark");
+
+  const canvas = $("twin");
+  canvas.style.display = "block";
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(640, 360, false);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0b14);
+  const camera = new THREE.PerspectiveCamera(70, 640 / 360, 0.05, 1000);
+  scene.add(camera);
+  scene.add(new SparkRenderer({ renderer }));
+
+  twin = { renderer, scene, SplatMesh, splat: null };
+  twinLoadRoom(headsetRoom);
+
+  const q = new THREE.Quaternion();
+  renderer.setAnimationLoop(() => {
+    // Lerp/slerp toward the latest 10 Hz sample — smooth at display rate.
+    camera.position.lerp(new THREE.Vector3(...targetP), 0.25);
+    q.set(...targetQ);
+    camera.quaternion.slerp(q, 0.25);
+    renderer.render(scene, camera);
+  });
+  $("twin-toggle").textContent = "running";
+};
+</script>
+</body>
+</html>
