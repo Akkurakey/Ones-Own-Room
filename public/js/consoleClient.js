@@ -18,7 +18,14 @@ const POSE_HZ = 10;
 
 export function initConsoleClient({ room, effects, camera, timeline }) {
   const qp = new URLSearchParams(location.search);
-  if (qp.get("ctl") !== "1") return;
+  const ctl = qp.get("ctl");
+  if (!ctl) return;
+  // ?ctl=1            → same-origin relay (page itself served by dev-server)
+  // ?ctl=https://xxx  → remote relay: the page loads from the deployed site
+  //                     (fixed Vercel domain) while control traffic goes to
+  //                     the researcher's tunnelled laptop. CORS on /ctl/*
+  //                     in dev-server.mjs makes the cross-origin calls legal.
+  const base = ctl === "1" ? "" : ctl.replace(/\/+$/, "");
 
   // Live tunables the console may drive. All are existing dynoFloat uniforms
   // (zero shader changes); warmth etc. stay deferred per design.md Step 5.5.
@@ -31,7 +38,7 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
   };
 
   const send = (msg) =>
-    fetch("/ctl/send", {
+    fetch(`${base}/ctl/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(msg),
@@ -50,7 +57,7 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
 
   // Probe before wiring anything: on the deployed site /ctl/send 404s and we
   // go dormant instead of letting EventSource retry forever.
-  fetch("/ctl/send", {
+  fetch(`${base}/ctl/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ to: "console", type: "hello-from-headset" }),
@@ -81,7 +88,7 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
       }
     }
     setInterval(() => {
-      fetch("/ctl/poll")
+      fetch(`${base}/ctl/poll`)
         .then((r) => r.json())
         .then((msgs) => msgs.forEach(handle))
         .catch(() => {});
