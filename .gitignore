@@ -1,4 +1,5 @@
 .env.local
 node_modules/
 .DS_Store
-CLAUDE.md
+public/resources/audio/1.mp3
+public/resources/worlds/env_333.spz
