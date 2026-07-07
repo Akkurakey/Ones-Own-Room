@@ -31,7 +31,18 @@ const TOOLS = new URL("./tools", import.meta.url).pathname;
 // where this dev server runs. On the deployed site /ctl 404s and the
 // headset-side client silently disables itself.
 const ctlClients = { headset: new Set(), console: new Set() };
+// Headset-bound messages queue for POLLING, not SSE: the headset usually
+// reaches this server through a cloudflared tunnel, and the http2 tunnel
+// transport buffers SSE downstream indefinitely (verified 2026-07 — the
+// stream connects but no bytes ever arrive). Plain GET round-trips pass
+// fine, so the headset polls /ctl/poll; the console (localhost) keeps SSE.
+const ctlHeadsetQueue = [];
 function ctlBroadcast(to, msg) {
+  if (to === "headset") {
+    ctlHeadsetQueue.push(msg);
+    if (ctlHeadsetQueue.length > 100) ctlHeadsetQueue.shift();
+    return;
+  }
   const payload = `data: ${JSON.stringify(msg)}\n\n`;
   for (const res of ctlClients[to] ?? []) res.write(payload);
 }
@@ -63,6 +74,11 @@ http.createServer(async (req, res) => {
     ctlClients[role].add(res);
     req.on("close", () => ctlClients[role].delete(res));
     return;
+  }
+  // Headset pull channel: drain queued commands (tunnel-safe, see above).
+  if (path === "/ctl/poll") {
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-cache" });
+    return res.end(JSON.stringify(ctlHeadsetQueue.splice(0)));
   }
   // ... and publish (POST {to, type, ...} relayed verbatim to that role).
   if (path === "/ctl/send" && req.method === "POST") {

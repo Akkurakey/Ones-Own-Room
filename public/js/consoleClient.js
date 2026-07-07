@@ -62,11 +62,11 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
     .catch(() => console.log("[ctl] no relay reachable — console client dormant"));
 
   function start() {
-    const es = new EventSource("/ctl/events?role=headset");
-    es.onmessage = (e) => {
-      let msg;
-      try { msg = JSON.parse(e.data); } catch { return; }
-
+    // Commands arrive by POLLING, not SSE: the cloudflared tunnel the Quest
+    // connects through buffers SSE downstream indefinitely (http2 transport,
+    // verified 2026-07), while plain GETs round-trip fine. 1 Hz is plenty —
+    // room switches are pre-session and a ≤1 s lag on a slider is invisible.
+    function handle(msg) {
       if (msg.type === "setParam" && msg.key in PARAMS) {
         PARAMS[msg.key].value = Number(msg.value);
         sendStatus();
@@ -79,8 +79,14 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
       } else if (msg.type === "hello") {
         sendStatus();
       }
-    };
-    es.onopen = sendStatus;
+    }
+    setInterval(() => {
+      fetch("/ctl/poll")
+        .then((r) => r.json())
+        .then((msgs) => msgs.forEach(handle))
+        .catch(() => {});
+    }, 1000);
+    sendStatus();
 
     // Pose feed for the twin monitor. Reused vectors — no per-tick allocation.
     const _p = new (camera.position.constructor)();

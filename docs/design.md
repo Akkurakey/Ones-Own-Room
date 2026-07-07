@@ -443,7 +443,7 @@ export const ROOM_CONFIG = {
 「房间层预生成、绿野仙踪式」的操作台落地：研究员在 PC 上换房间、实时调氛围参数、用姿态孪生监控头显视角。
 
 - **rooms.json 是每个世界的单一事实源**：`{ id, name, file, offsetY/rotationY(对位), profile(persona 台词素材，必须写实), bounds(行走边界) }`。main.js 按 `?room=<id>`（默认 3）加载；换/加房间只改这一个文件。env_2(泳池)/4(黄昏操场)/5(粉色洗衣房) 的 profile 已按截图写实，**bounds 仍是占位**——研究用前按流程实测（?debug 走墙读 `_rig.position`）。
-- **传输**：dev-server.mjs 内置零依赖 SSE+POST 中继（`GET /ctl/events?role=headset|console` + `POST /ctl/send`），内存态、**本地专属**——Vercel serverless 撑不住长连接，这是刻意的：控制台是实验室仪器，不是产品面。部署环境里头显侧 consoleClient（`?ctl=1` 启用）探测不到 /ctl 即静默休眠，零影响。
+- **传输**：dev-server.mjs 内置零依赖中继，内存态、**本地专属**——Vercel serverless 撑不住长连接，这是刻意的：控制台是实验室仪器，不是产品面。**方向不对称**：console（localhost）用 SSE 收（`/ctl/events?role=console`）；headset 用 **1Hz 轮询**收（`/ctl/poll`）——因为 Quest 经 cloudflared 隧道接入，http2 隧道会把 SSE 下行无限缓冲（2026-07 实测：连接建立但零字节到达），普通 GET 往返不受影响。双方发都走 `POST /ctl/send`。部署环境里头显侧 consoleClient（`?ctl=1` 启用）探测不到 /ctl 即静默休眠，零影响。
 - **能力**：换房间（会话前选定，头显自动重载）；实时调 uExposure/uGlow/uHazeDensity/uHazeStrength/uGlowRound（全是现有活 uniform，冷暖仍按 5.5 推后）；**姿态孪生**——头显 10Hz POST 头部位姿（Quest 侧≈零成本，帧预算不动），控制台用同一 spz 资源自渲染头显视角、lerp 插值到显示帧率，且跟随换房。真实像素需求用 Quest 自带投屏兜底。
 - **页面**：`tools/console.html`，dev-server 路由 `/console`；在 tools/ 而非 public/ = 永不部署。UI 纯功能风，不入梦核美学。
 
