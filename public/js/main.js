@@ -176,49 +176,59 @@ const _worldUp = new THREE.Vector3(0, 1, 0);
 const VR_MOVE_SPEED = num("vspeed", 1.5);
 const STICK_DEADZONE = 0.15;   // resting sticks report small nonzero values
 
-// ---------- DEBUG: first-person controls (desktop only) ----------
-// PointerLockControls handles mouse look (yaw + pitch) on the camera.
-// WASD movement translates the rig so VR positioning stays correct.
-// Arrow keys adjust splat offset/rotation for scene alignment.
-//
-// Key map (no Shift required for anything):
-//   Mouse drag  — look around (after clicking canvas to acquire lock)
-//   W / S       — move forward / backward
-//   A / D       — strafe left / right
-//   ↑ / ↓       — splat Y offset (align floor)
-//   ← / →       — splat rotation Y (align orientation)
-//
-// All handlers early-return when renderer.xr.isPresenting — the headset
-// owns input in XR. No global keyboard suppression so text input stays
-// possible for future features.
+// ---------- Desktop first-person controls (default, not debug-gated) ----------
+// The web build is the freely explorable version of the room (decision
+// 2026-07), so mouse look + WASD are the default desktop experience:
+//   Mouse drag  — look around (after clicking the canvas to acquire lock)
+//   W/A/S/D     — walk (clamped to ROOM_BOUNDS like the VR thumbstick)
+// All handlers early-return when renderer.xr.isPresenting — the headset owns
+// look and locomotion in VR. No global keyboard suppression: isTyping keeps
+// WASD letters typable in the threshold's name / mood fields.
 
 const keys = new Set();  // currently held WASD keys
 
-// Debug key handlers must never eat keystrokes meant for the threshold's
+// Key handlers must never eat keystrokes meant for the threshold's
 // name / mood text fields.
 const isTyping = (e) => /^(INPUT|TEXTAREA)$/.test(e.target?.tagName ?? "");
 
+const { PointerLockControls } =
+  await import("three/addons/controls/PointerLockControls.js");
+
+const fpControls = new PointerLockControls(camera, renderer.domElement);
+
+// The click that acquires pointer lock also fires voice.press() — harmless:
+// session.js ignores taps under 350 ms, so a look-around click never starts
+// a conversation turn.
+renderer.domElement.addEventListener("click", () => {
+  if (!renderer.xr.isPresenting) fpControls.lock();
+});
+
+const MOVE_KEYS = new Set(["w", "a", "s", "d"]);
+window.addEventListener("keydown", (e) => {
+  if (renderer.xr.isPresenting || isTyping(e)) return;
+  if (MOVE_KEYS.has(e.key.toLowerCase())) keys.add(e.key.toLowerCase());
+});
+window.addEventListener("keyup", (e) => {
+  if (renderer.xr.isPresenting) return;
+  keys.delete(e.key.toLowerCase());
+});
+
+// XR session: release lock and park the desktop handlers.
+// keys.clear() prevents stuck-key drift when returning to desktop.
+renderer.xr.addEventListener("sessionstart", () => {
+  document.exitPointerLock();
+  fpControls.enabled = false;
+  keys.clear();
+});
+renderer.xr.addEventListener("sessionend", () => {
+  fpControls.enabled = true;
+  rig.position.y = DESKTOP_EYE_HEIGHT;
+});
+
+// ---------- DEBUG-only tools ----------
+// Arrow keys align the splat; number keys drive orb states; key 0 (wired
+// further down) skips the check-in.
 if (DEBUG) {
-  const { PointerLockControls } =
-    await import("three/addons/controls/PointerLockControls.js");
-
-  const fpControls = new PointerLockControls(camera, renderer.domElement);
-
-  renderer.domElement.addEventListener("click", () => {
-    if (!renderer.xr.isPresenting) fpControls.lock();
-  });
-
-  // WASD: track key state, XR-gated.
-  const MOVE_KEYS = new Set(["w", "a", "s", "d"]);
-  window.addEventListener("keydown", (e) => {
-    if (renderer.xr.isPresenting || isTyping(e)) return;
-    if (MOVE_KEYS.has(e.key.toLowerCase())) keys.add(e.key.toLowerCase());
-  });
-  window.addEventListener("keyup", (e) => {
-    if (renderer.xr.isPresenting) return;
-    keys.delete(e.key.toLowerCase());
-  });
-
   // Arrow keys: splat repositioning, XR-gated.
   // X-axis offset removed: WASD walking covers horizontal placement.
   window.addEventListener("keydown", (e) => {
@@ -244,18 +254,6 @@ if (DEBUG) {
     else if (e.key === "3") orbStateTarget = 1;
     else if (e.key === "4") { orbWaiting = !orbWaiting; orb.setWaiting(orbWaiting); }
     else if (e.key === "5") { wristShown = !wristShown; wristMenu.forceShow(wristShown); }
-  });
-
-  // XR session: release lock and disable desktop input handlers.
-  // keys.clear() prevents stuck-key drift when returning to desktop.
-  renderer.xr.addEventListener("sessionstart", () => {
-    document.exitPointerLock();
-    fpControls.enabled = false;
-    keys.clear();
-  });
-  renderer.xr.addEventListener("sessionend", () => {
-    fpControls.enabled = true;
-    rig.position.y = DESKTOP_EYE_HEIGHT;
   });
 }
 
