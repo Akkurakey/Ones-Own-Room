@@ -193,7 +193,9 @@
        fog, from blurred and dark to clear and lit. Hover strengthens the
        glow only — no scaling, no bouncing. */
     #t-enter-btn {
-      margin-top: 52vh;
+      /* Anchored to the lower edge, well below the orb (screen-centre-ish),
+         so the lifeboat pill never covers her. */
+      margin-top: auto; margin-bottom: 10vh;
       padding: 15px 52px;
       background: rgba(240, 236, 244, 0.05);
       border: 1px solid var(--room-line); border-radius: 999px;
@@ -244,7 +246,10 @@
       <p class="t-caption">Hold the orb, and tell me how you are.</p>
       <textarea id="t-mood-text" spellcheck="false"></textarea>
       <button id="t-mood-done" class="t-whisper">that's how I am</button>
-      <p class="t-hint" id="t-mood-hint">press and hold anywhere, speak, let go</p>
+      <!-- Status feedback only — the caption (and her voice) carry the one
+           instruction; a second "press and hold" line read as a demand for a
+           second hold (headset feedback 2026-07). -->
+      <p class="t-hint" id="t-mood-hint"></p>
       <div class="t-corner-l"><button id="t-nottoday" class="t-whisper">not today</button></div>
       <div class="t-corner-r"><button id="t-keyboard" class="t-whisper" title="type instead">&#x2328;</button></div>
     </section>

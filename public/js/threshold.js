@@ -86,6 +86,9 @@ export function createThreshold({ audio, orb, voice, onEnter, onFirstTouch }) {
     });
     await audio.unlock();
     await speak(GUIDE.welcome);
+    // A breath after her welcome — cutting straight to the first question
+    // read as rushed (headset feedback 2026-07).
+    await new Promise((r) => setTimeout(r, 1100));
     show("name");
     speak(GUIDE.name);
   });
@@ -123,6 +126,13 @@ export function createThreshold({ audio, orb, voice, onEnter, onFirstTouch }) {
   });
   buildRow("t-arousal-row", samArousal, (v) => {
     inputs.arousal = v;
+    // Mic permission rides THIS click's gesture, so the dialog appears while
+    // the mood screen fades in — by the time the user holds, the mic is
+    // usually already granted and the FIRST hold records. Asking inside the
+    // hold itself ate that hold and read as "press twice" (headset feedback
+    // 2026-07). Denial is handled at hold time (falls back to typing).
+    micInit ??= voice.init(audio.ctx);
+    micInit.catch(() => {});   // handled where it's awaited; don't be unhandled here
     setTimeout(() => {
       show("mood");
       speak(GUIDE.mood);
@@ -146,33 +156,47 @@ export function createThreshold({ audio, orb, voice, onEnter, onFirstTouch }) {
 
   // ---------- Screen 3: mood ----------
   // Hold-to-speak, identical to the in-room gesture — the user learns the
-  // room's one and only interaction before they enter it. Mic permission is
-  // requested inside this first hold (the permission dialog interrupts the
-  // hold, so the hint asks for a fresh one afterwards).
+  // room's one and only interaction before they enter it. Mic permission was
+  // already requested on the arousal pick (micInit above), so the first hold
+  // here goes straight to recording. The hint stays empty by default: the
+  // caption and her voice are the single instruction, and the hint only ever
+  // reports state (recording / transcribing / too-short retry).
   const moodScreen = screens.mood;
   const moodHint = document.getElementById("t-mood-hint");
-  let micReady = false;
+  let micInit = null;
   let recording = false;
+  let moodHeld = false;
+  const releaseHold = () => { moodHeld = false; };
+  window.addEventListener("pointerup", releaseHold);
+  window.addEventListener("pointercancel", releaseHold);
 
   moodScreen.addEventListener("pointerdown", async (e) => {
     // Buttons and the textarea keep their own meanings.
     if (e.target.closest("button, textarea")) return;
-    if (moodScreen.classList.contains("typing") || done) return;
+    if (moodScreen.classList.contains("typing") || done || recording) return;
 
-    if (!micReady) {
-      moodHint.textContent = "the room would like to hear you…";
-      try {
-        await voice.init(audio.ctx);
-        micReady = true;
-        moodHint.textContent = "now — press and hold, speak, let go";
-      } catch (err) {
-        console.warn("threshold: mic denied — falling back to typing", err);
-        toTyping();
-      }
-      return;   // permission dialog ate this hold; ask for a fresh one
+    // Stop the browser from turning the long press into text selection or a
+    // context gesture — on Quest that ends the pointer stream with
+    // pointercancel instead of pointerup and the release edge goes missing.
+    e.preventDefault();
+
+    moodHeld = true;
+    try {
+      micInit ??= voice.init(audio.ctx);   // safety net if the pick was skipped
+      await micInit;                       // usually already resolved
+    } catch (err) {
+      console.warn("threshold: mic denied — falling back to typing", err);
+      toTyping();
+      return;
+    }
+    // The await above may have outlived the hold (first visit: the dialog is
+    // still up when they try). A released or superseded hold quietly asks for
+    // a fresh one instead of recording nothing.
+    if (!moodHeld || done || recording || moodScreen.classList.contains("typing")) {
+      moodHint.textContent = "press and hold anywhere, speak, let go";
+      return;
     }
 
-    if (recording) return;
     recording = true;
     voice.press();
     orb.setRecording(true);
