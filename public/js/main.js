@@ -181,6 +181,10 @@ const STICK_DEADZONE = 0.15;   // resting sticks report small nonzero values
 // 2026-07), so mouse look + WASD are the default desktop experience:
 //   Mouse drag  — look around (after clicking the canvas to acquire lock)
 //   W/A/S/D     — walk (clamped to ROOM_BOUNDS like the VR thumbstick)
+// Exploration unlocks only once the room is THERE (timeline settled): during
+// the check-in void and the reveal the view stays on the composed framing —
+// the orb is the subject until the world has finished condensing. ?debug is
+// exempt so alignment/measuring workflows keep working pre-reveal.
 // All handlers early-return when renderer.xr.isPresenting — the headset owns
 // look and locomotion in VR. No global keyboard suppression: isTyping keeps
 // WASD letters typable in the threshold's name / mood fields.
@@ -191,6 +195,9 @@ const keys = new Set();  // currently held WASD keys
 // name / mood text fields.
 const isTyping = (e) => /^(INPUT|TEXTAREA)$/.test(e.target?.tagName ?? "");
 
+// The room is explorable once the world has condensed (or always in ?debug).
+const canExplore = () => DEBUG || timeline.state === "settled";
+
 const { PointerLockControls } =
   await import("three/addons/controls/PointerLockControls.js");
 
@@ -200,12 +207,12 @@ const fpControls = new PointerLockControls(camera, renderer.domElement);
 // session.js ignores taps under 350 ms, so a look-around click never starts
 // a conversation turn.
 renderer.domElement.addEventListener("click", () => {
-  if (!renderer.xr.isPresenting) fpControls.lock();
+  if (!renderer.xr.isPresenting && canExplore()) fpControls.lock();
 });
 
 const MOVE_KEYS = new Set(["w", "a", "s", "d"]);
 window.addEventListener("keydown", (e) => {
-  if (renderer.xr.isPresenting || isTyping(e)) return;
+  if (renderer.xr.isPresenting || isTyping(e) || !canExplore()) return;
   if (MOVE_KEYS.has(e.key.toLowerCase())) keys.add(e.key.toLowerCase());
 });
 window.addEventListener("keyup", (e) => {
