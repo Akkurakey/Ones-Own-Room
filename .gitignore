@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 public/resources/audio/1.mp3
 public/resources/worlds/env_333.spz
+CLAUDE.md
+docs/
