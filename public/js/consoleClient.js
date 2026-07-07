@@ -37,10 +37,14 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
     glowRound: effects.uniforms.uGlowRound,
   };
 
+  // ngrok's free tier interposes a browser-warning page on tunnelled
+  // requests unless this header is present; harmless on other tunnels.
+  const HDRS = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" };
+
   const send = (msg) =>
     fetch(`${base}/ctl/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: HDRS,
       body: JSON.stringify(msg),
     }).catch(() => {});   // relay gone mid-session — never surface an error
 
@@ -59,7 +63,7 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
   // go dormant instead of letting EventSource retry forever.
   fetch(`${base}/ctl/send`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: HDRS,
     body: JSON.stringify({ to: "console", type: "hello-from-headset" }),
   })
     .then((r) => {
@@ -88,7 +92,7 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
       }
     }
     setInterval(() => {
-      fetch(`${base}/ctl/poll`)
+      fetch(`${base}/ctl/poll`, { headers: { "ngrok-skip-browser-warning": "1" } })
         .then((r) => r.json())
         .then((msgs) => msgs.forEach(handle))
         .catch(() => {});
