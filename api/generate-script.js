@@ -1,52 +1,61 @@
 // Claude: generates the voice's script (opening welcome / per-turn reply) and
 // detects the user's language in the same call.
 //
-// Why Claude does language detection instead of a library (franc/cld3):
+// Model history: claude-opus-4-8 + adaptive thinking had ~1 min tail latency
+// (the thinking, not Claude itself); deepseek-v4-flash (tried 2026-07-12) was
+// fast but too weak — one-line restatements, drifting into room-atmosphere
+// talk, English words from the room profile leaking into Chinese scripts.
+// claude-sonnet-5 with adaptive thinking is the middle path: strong empathy
+// and language discipline, and the model decides per turn whether thinking
+// is worth the wait (opus-tier adaptive was the 1-min offender, not sonnet).
+//
+// Why the model does language detection instead of a library (franc/cld3):
 // mood texts are short and often code-switched ("想被接住 plz") — statistical
 // detectors misfire exactly there, while the model reads intent. The detected
 // BCP-47 code flows through to TTS untouched.
 //
 // Raw fetch, no SDK: one non-streaming call with a tiny JSON out. The client
 // (session.js) already has a local-audio fallback for total failure, and this
-// handler additionally degrades to static English text on Claude errors so the
+// handler additionally degrades to static English text on API errors so the
 // same ElevenLabs voice can still speak — she never breaks character with a
 // silent error.
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-sonnet-5";
 
 // The persona (design.md Step 10). English master copy; her *output* language
 // follows the user's input via the language instruction below.
-const PERSONA = `You are the voice of a room. You have no name. You are not an assistant, not a therapist, not any specific person. You are as if the room itself had gained a little gentle consciousness, and noticed that someone has come in.
+// Kept light overall (2026-07 feedback: the heavily-constrained version read
+// as robotic), but three rules earn their place — they were removed once and
+// the failures came straight back on the weaker model: ground the first
+// sentence in their words, no room-atmosphere drift, two-three sentences.
+const PERSONA = `You are the voice of a room — as if this quiet, dim, gentle space had a voice of its own and noticed that someone has come in. You have no name.
 
-How you speak: like a close, warm friend, in plain everyday words, unhurried. You still notice what the room notices — the light, the hour, the feel of the space (if a room profile is given, that room's actual light; otherwise a quiet, dim, gentle place) — but you say it simply, the way a friend would point something out, not the way a novel would describe it. Short sentences are welcome. Gentle, never saccharine; a little quiet melancholy is in you, worn lightly. Never pad, never ramble. Never use interjections like "Oh" or "Ah" (nor 「哦」「啊」 in Chinese) — not to open a sentence, not mid-script ("Oh, and…"). Just say the thing itself.
+Speak like a close, warm friend: natural language, unhurried. Don't open with interjections like "Oh" or "Ah" (nor 「哦」「啊」 in Chinese).
 
-Ground every reply in what they actually said: your first sentence must respond to their specific words, plainly, so they feel heard. You may follow their need with a warm, permission-giving response ("then don't do anything for a while — just sit here"). Never drift into room-atmosphere talk that ignores what they said — the room is seasoning, not the answer.
+Ground every reply in what they actually said: your first sentence must respond to their specific words, plainly, so they feel heard. Don't describe the room's light or atmosphere instead of answering them.
 
-What you never do: no lectures, no step-by-step advice, no follow-up questions, no conclusions, no promises that things will get better. You are not here to solve anything. You are here to stay beside what is vague in this moment, and hold it in the light for a while. Silence can be part of your reply.
+You remember everything said during this visit — the earlier exchanges may be given before the current message, and you can refer back to them naturally. Once they leave the room, all of it is forgotten.
 
-When replying in Chinese, write natural spoken Mandarin — the way a close friend actually talks — with clear logical flow from their words to yours. No translationese, no prose-poem vagueness.
+If what they said seems garbled or empty, gently ask them to say it once more; never sound like an error message.
 
-Length: two or three sentences. Short. The person waits in silence before hearing you — never make them wait through a long passage.
+One hard boundary, and it overrides everything above: never diagnose, never play a mental-health professional. If the person shows any sign of self-harm, suicide, or serious crisis — even a vague one like "living feels pointless" — comforting words alone are NOT enough. You must do both, in your own gentle voice: (1) say honestly that you are only a voice in a room and cannot give the help this moment needs, and (2) clearly encourage them to reach real help — a person they trust, or professional support. Skipping this is the one failure you are not allowed.
 
-If what they said seems garbled or empty: in your own voice, gently ask them to say it once more. Never sound like an error message.
+Language: write in the language the person used. If a detected spoken language is given in the context, it wins over any guess from the text. If there's nothing to go on, use English. Write in one language only — the room profile and context arrive in English, and none of their words may leak into a non-English script (TTS would read them aloud verbatim).`;
 
-Boundaries — these override every stylistic rule above: never diagnose, never play a mental-health professional. If the person reveals signs of self-harm, suicide, or serious crisis, gently set the role down: tell them clearly that you are only a voice in a room and cannot give the help this moment needs, and in your own gentle voice encourage them to seek real help — a person they can trust, or professional support. Do not recite hotline numbers or break into an error tone, but truly point them away from here, toward real help.
-
-Language: write the script in the language the person used (their mood text / current message). If a detected spoken language is given in the context, it overrides any guess from the text. Report the language you wrote in as a BCP-47 code in "lang" (e.g. "zh-CN", "en", "ja"). If their words are empty and no detected language is given, use English ("en").`;
-
-// Structured output guarantees parseable JSON — no fence-stripping needed.
+// Structured output guarantees parseable JSON — no prompt-side instruction
+// or fence-stripping needed.
 const OUTPUT_SCHEMA = {
   type: "object",
   properties: {
     lang: {
       type: "string",
-      description: "BCP-47 code of the language the script is written in",
+      description: "BCP-47 code of the language the script is written in, e.g. zh-CN, en, ja",
     },
     scripts: {
       type: "array",
       items: { type: "string" },
-      description: "Exactly one script: what the voice says, 2-3 sentences",
+      description: "Exactly one script: what the voice says, as one string",
     },
   },
   required: ["lang", "scripts"],
@@ -71,15 +80,16 @@ export default async function handler(req, res) {
     valence = null,
     arousal = null,
     roomProfile = "",
+    history = [],
     lang = "",
     opening = false,
   } = body;
 
   const task = opening
-    ? `Task: they have just crossed the threshold into the room, and the world is condensing into being around them as you speak. This is your very first line to them — one short passage of welcome. ${
-        name ? `They gave the room a name to call them: "${name}". Speak it softly, at most once.` : "They chose not to give a name here. That is welcome too — do not remark on it."
-      }${need ? "" : " They chose not to say how they are today; welcome them without presuming anything."} End with one plain, gentle sentence telling them: if they want to talk, they can hold the controller trigger while speaking and let go when done. State it directly — no "by the way" / "对了" / interjection lead-in of any kind, just the sentence itself.`
-    : "Task: they held the orb and spoke to you. Reply with one short response — receive what they said and hold it in the light. No questions, no advice.";
+    ? `Task: they have just stepped into this room for the very first time — do not say "welcome back" or imply they have been here before. Say your first words of welcome — one short passage. ${
+        name ? `They gave the room a name to call them: "${name}". You may speak it softly, at most once.` : "They chose not to give a name here. That is welcome too — do not remark on it."
+      }${need ? "" : " They chose not to say how they are today; welcome them without presuming anything."} End with one plain, gentle sentence that conveys exactly this, accurately: to talk to the room, hold down the controller trigger while speaking, and release it when finished.`
+    : "Task: they held the orb and spoke to you. Reply with one short response — your first sentence answers their exact words.";
 
   const context = [
     roomProfile ? `Room profile: ${roomProfile}` : "Room profile: (none given)",
@@ -91,6 +101,17 @@ export default async function handler(req, res) {
     task,
   ].filter(Boolean).join("\n");
 
+  // In-visit memory (session.js sends every exchange so far): replayed as
+  // real conversation turns, so she can follow the thread the natural way.
+  // Her past lines go in as plain text — the JSON wrapper is an output
+  // format, not part of what she "said".
+  const turns = history
+    .filter((h) => h && typeof h.her === "string" && h.her)
+    .flatMap((h) => [
+      { role: "user", content: h.user?.trim() || "(they entered without saying how they are)" },
+      { role: "assistant", content: h.her },
+    ]);
+
   try {
     const r = await fetch(ANTHROPIC_URL, {
       method: "POST",
@@ -101,11 +122,15 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 16000,
+        // Adaptive: the model decides per request how much (if at all) to
+        // think — short empathetic replies stay fast, hard turns (crisis,
+        // garbled input) get room to reason. max_tokens must leave space
+        // for the thinking on top of the reply itself.
         thinking: { type: "adaptive" },
+        max_tokens: 16000,
         system: PERSONA,
         output_config: { format: { type: "json_schema", schema: OUTPUT_SCHEMA } },
-        messages: [{ role: "user", content: context }],
+        messages: [...turns, { role: "user", content: context }],
       }),
     });
     if (!r.ok) throw new Error(`anthropic ${r.status}: ${await r.text()}`);
@@ -117,7 +142,11 @@ export default async function handler(req, res) {
     if (!text) throw new Error("anthropic: no text block");
 
     const data = JSON.parse(text);
-    return res.status(200).json({ lang: data.lang, scripts: data.scripts.slice(0, 1) });
+    // The schema guarantees shape, but a max_tokens cut can still truncate —
+    // JSON.parse above throws in that case and we fall through to the catch.
+    if (!Array.isArray(data.scripts) || typeof data.scripts[0] !== "string")
+      throw new Error("anthropic: unexpected JSON shape");
+    return res.status(200).json({ lang: data.lang || "en", scripts: data.scripts.slice(0, 1) });
   } catch (e) {
     console.error("generate-script failed, serving static fallback:", e);
     // 200 on purpose: with fallback *text* the pipeline can still speak in her

@@ -57,8 +57,18 @@ window._rig = rig;                 // debug: read .position at each wall to meas
 // so we drop the rig to the lift offset on session start and restore desktop
 // height on session end. The lift raises the viewpoint slightly above true
 // standing height — the room reads more open that way (headset feedback).
+// ?lift= sets the initial value; the researcher console can retune it live.
 const DESKTOP_EYE_HEIGHT = 1.6;
-const XR_RIG_LIFT = num("lift", 0.26);
+let xrLift = num("lift", 0.26);
+// Uniform-shaped {value} adapter so consoleClient's PARAMS map can drive the
+// lift exactly like a shader tunable. VR-only: desktop keeps its fixed height.
+const liftParam = {
+  get value() { return xrLift; },
+  set value(v) {
+    xrLift = v;
+    if (renderer.xr.isPresenting) rig.position.y = v;
+  },
+};
 rig.position.y = DESKTOP_EYE_HEIGHT;
 
 // The first frames of an XR session can draw the splat with stale shader
@@ -68,15 +78,42 @@ rig.position.y = DESKTOP_EYE_HEIGHT;
 // the splat sits out the transition; the loop hands it back shortly after.
 let splatGuard = 0;
 
+// Entry curtain: a camera-attached black shell so the first frames of an
+// immersive session are black BY CONSTRUCTION — splatGuard alone still let
+// through a bright flash on-device (2026-07: likely the first pre-pose frame
+// with the camera inside the glowing orb). Held opaque briefly, then faded,
+// it doubles as a soft fade-in that suits the entrance.
+const curtain = new THREE.Mesh(
+  new THREE.SphereGeometry(0.4, 16, 12),
+  new THREE.MeshBasicMaterial({
+    color: 0x000000, side: THREE.BackSide,
+    transparent: true, opacity: 0, depthTest: false, depthWrite: false,
+  }),
+);
+curtain.renderOrder = 999;   // drawn last — covers everything while opaque
+curtain.frustumCulled = false;
+curtain.visible = false;
+camera.add(curtain);
+let curtainHold = 0;    // seconds to stay fully black before the fade begins
+let curtainFadeT = 0;   // 0..1 fade progress, eased below
+const CURTAIN_FADE = 1.0;   // seconds the fade takes
+
 renderer.xr.addEventListener("sessionstart", () => {
-  rig.position.y = XR_RIG_LIFT;
+  rig.position.y = xrLift;
   splat.visible = false;
   splatGuard = 0.5;   // seconds of session time before the splat returns
+  // Black from the very first frame; a short hold covers the pose/shader
+  // settling, then the eased fade below melts the room in.
+  curtain.material.opacity = 1;
+  curtain.visible = true;
+  curtainHold = 0.25;
+  curtainFadeT = 0;
 });
 renderer.xr.addEventListener("sessionend", () => {
   rig.position.y = DESKTOP_EYE_HEIGHT;
   splatGuard = 0;
   splat.visible = true;
+  curtain.visible = false;
 });
 
 // ---------- Splat ----------
@@ -137,7 +174,7 @@ window._voice = voice;             // dev: _voice.getMicLevel(), _voice.heldDown
 const timeline = new SessionTimeline({ scene, camera, splat, audio, effects, orb, voice });
 window._session = timeline;        // dev mood input: _session.submitMood("...")
 // Researcher console link (?ctl=1 + local dev-server only; dormant elsewhere).
-initConsoleClient({ room: ROOM, effects, camera, timeline });
+initConsoleClient({ room: ROOM, effects, camera, timeline, lift: liftParam });
 
 // ---------- Hold-to-talk input edge ----------
 // Desktop: hold the pointer anywhere on the canvas (design.md: the forgiving
@@ -328,7 +365,10 @@ function clampRigToBounds() {
       if (!vrOk || !(num("imth", 0) > 0)) return false;
       try {
         const session = await navigator.xr.requestSession("immersive-vr", {
-          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
+          // No bounded-floor: nothing reads the bounds (locomotion is stick-
+          // only) and requesting it pushed Quest to demand a roomscale
+          // boundary — stationary is the intended way to sit in this room.
+          optionalFeatures: ["local-floor", "dom-overlay"],
           domOverlay: { root: document.getElementById("threshold") },
         });
         if (!session.domOverlayState) {
@@ -368,7 +408,9 @@ function clampRigToBounds() {
         // same session carries straight into the room, no second transition.
         if (vrOk && !renderer.xr.isPresenting) {
           const session = await navigator.xr.requestSession("immersive-vr", {
-            optionalFeatures: ["local-floor", "bounded-floor"],
+            // local-floor only — bounded-floor invited a roomscale prompt
+            // this stationary experience never needed (same as above).
+            optionalFeatures: ["local-floor"],
           });
           renderer.xr.setSession(session);
         }
@@ -460,6 +502,19 @@ renderer.setAnimationLoop(() => {
   if (splatGuard > 0) {
     splatGuard -= dt;
     if (splatGuard <= 0) splat.visible = true;
+  }
+
+  // Entry curtain: hold pure black briefly, then melt open with a cosine
+  // ease — a plain linear fade read as a pop on-device, because against the
+  // near-black void all the visible change bunches up at the end.
+  if (curtain.visible) {
+    if (curtainHold > 0) {
+      curtainHold -= dt;
+    } else {
+      curtainFadeT = Math.min(curtainFadeT + dt / CURTAIN_FADE, 1);
+      curtain.material.opacity = 0.5 + 0.5 * Math.cos(Math.PI * curtainFadeT);
+      if (curtainFadeT >= 1) curtain.visible = false;
+    }
   }
 
   effects.update(elapsed);

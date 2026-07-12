@@ -16,7 +16,7 @@
 
 const POSE_HZ = 10;
 
-export function initConsoleClient({ room, effects, camera, timeline }) {
+export function initConsoleClient({ room, effects, camera, timeline, lift }) {
   const qp = new URLSearchParams(location.search);
   const ctl = qp.get("ctl");
   if (!ctl) return;
@@ -27,14 +27,15 @@ export function initConsoleClient({ room, effects, camera, timeline }) {
   //                     in dev-server.mjs makes the cross-origin calls legal.
   const base = ctl === "1" ? "" : ctl.replace(/\/+$/, "");
 
-  // Live tunables the console may drive. All are existing dynoFloat uniforms
-  // (zero shader changes); warmth etc. stay deferred per design.md Step 5.5.
+  // Live tunables the console may drive. Shader uniforms plus the rig-lift
+  // adapter from main.js — anything with a {value} interface fits here.
   const PARAMS = {
     exposure: effects.uniforms.uExposure,
     glow: effects.uniforms.uGlow,
     hazeDensity: effects.uniforms.uHazeDensity,
     hazeStrength: effects.uniforms.uHazeStrength,
     glowRound: effects.uniforms.uGlowRound,
+    lift,
   };
 
   // ngrok's free tier interposes a browser-warning page on tunnelled

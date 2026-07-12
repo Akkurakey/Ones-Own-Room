@@ -37,6 +37,12 @@ export class SessionTimeline {
     // Researcher session record (design.md Step 14) — the OTHER data line,
     // separate from what the model sees. Transcripts only, never audio.
     this.log = [];
+
+    // In-visit conversation memory: [{user, her}] pairs sent with every
+    // generate request, so she can follow the thread within one visit.
+    // Lives only in this object — leaving the room (session end, page
+    // unload) forgets everything by construction; nothing is persisted.
+    this.history = [];
   }
 
   // Called from the enter-VR gesture. The world withdraws to black the moment
@@ -44,6 +50,7 @@ export class SessionTimeline {
   start(inputs = {}) {
     this.inputs = inputs;
     this.running = true;
+    this.history = [];   // a fresh visit starts with a blank memory
     this.state = "listening";
     this.effects.uniforms.uReveal.value = 0;
     this.orb.setState(0);
@@ -70,6 +77,10 @@ export class SessionTimeline {
     try {
       const r = await this._generate({ need: moodText, opening: true });
       this.audioUrls = await this.audio.synthesizeAll(r.scripts, r.lang);
+      // The opening exchange seeds the in-visit memory: what they said at
+      // the door, and how she welcomed them. Pushed only once audio exists —
+      // memory must never contain words she didn't actually speak.
+      this.history.push({ user: moodText ?? "", her: r.scripts[0] });
       this.responseReady = true;   // consumed by update() — the ignition event
     } catch (e) {
       console.warn("session: AI pipeline unavailable — fallback + simulated latency", e);
@@ -92,6 +103,9 @@ export class SessionTimeline {
         valence: this.inputs.valence ?? null,
         arousal: this.inputs.arousal ?? null,
         roomProfile: this.inputs.roomProfile ?? "",
+        // Everything said so far this visit — she remembers within a visit,
+        // and forgets the moment they leave (history dies with the page).
+        history: this.history,
         // Door language pins the opening only; each turn's speech carries its
         // own language and Claude reads it from the words themselves.
         lang: opening ? this.inputs.lang ?? "" : "",
@@ -147,6 +161,9 @@ export class SessionTimeline {
       text = await this.voice.transcribe(clip.blob);
       const r = await this._generate({ need: text, opening: false });
       replyUrl = (await this.audio.synthesizeAll([r.scripts[0]], r.lang))[0];
+      // Remember the exchange only once her reply is real, synthesized audio;
+      // a failed turn (oneFallback below) never enters the memory.
+      this.history.push({ user: text, her: r.scripts[0] });
     } catch (e) {
       // In-character recovery: a local pre-recorded "I didn't quite catch
       // that" — she never surfaces an error tone.
