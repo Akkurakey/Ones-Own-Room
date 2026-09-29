@@ -20,27 +20,7 @@ export default async function handler(req, res) {
   if (!text.trim()) return res.status(400).json({ error: "text required" });
 
   try {
-    const r = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "xi-api-key": process.env.ELEVENLABS_API_KEY,
-        },
-        body: JSON.stringify({
-          text,
-          model_id: MODEL_ID,
-          // High stability reads calmer and softer — gentler delivery was
-          // explicit user feedback (2026-07); guides are generated with the
-          // same settings so she is one voice throughout.
-          voice_settings: { stability: 0.75, similarity_boost: 0.75 },
-        }),
-      },
-    );
-    if (!r.ok) throw new Error(`elevenlabs ${r.status}: ${await r.text()}`);
-
-    const audio = Buffer.from(await r.arrayBuffer());
+    const audio = await synthesize(text);
     res.setHeader("Content-Type", "audio/mpeg");
     return res.status(200).send(audio);
   } catch (e) {
@@ -49,6 +29,34 @@ export default async function handler(req, res) {
     // switches to the pre-recorded local fallbacks.
     return res.status(500).json({ error: "tts failed" });
   }
+}
+
+// Shared with generate-script.js, which synthesizes a streamed reply sentence
+// by sentence. previousText is the part of the same reply already spoken:
+// ElevenLabs uses it to keep intonation continuous across the chunk seams,
+// so the pieces still sound like one breath rather than separate clips.
+export async function synthesize(text, previousText = "") {
+  const r = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "xi-api-key": process.env.ELEVENLABS_API_KEY,
+      },
+      body: JSON.stringify({
+        text,
+        model_id: MODEL_ID,
+        // High stability reads calmer and softer — gentler delivery was
+        // explicit user feedback (2026-07); guides are generated with the
+        // same settings so she is one voice throughout.
+        voice_settings: { stability: 0.75, similarity_boost: 0.75 },
+        ...(previousText ? { previous_text: previousText } : {}),
+      }),
+    },
+  );
+  if (!r.ok) throw new Error(`elevenlabs ${r.status}: ${await r.text()}`);
+  return Buffer.from(await r.arrayBuffer());
 }
 
 async function readJsonBody(req) {

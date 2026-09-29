@@ -62,12 +62,17 @@ export function createThreshold({ audio, orb, voice, onEnter, onFirstTouch }) {
 
   // Guide lines play through the same playVoice path as her AI speech —
   // same ducking, same speaking pulse. She is one person throughout.
+  // A newer line cuts this one off (audio.playVoice), so only the latest
+  // call may switch the pulse off — otherwise the interrupted line's ending
+  // would still the orb while the new one is speaking.
+  let speakSeq = 0;
   async function speak(url) {
+    const seq = ++speakSeq;
     orb.setSpeaking(true);
     try {
       await audio.playVoice(url);
     } finally {
-      orb.setSpeaking(false);
+      if (seq === speakSeq) orb.setSpeaking(false);
     }
   }
 

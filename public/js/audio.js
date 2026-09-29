@@ -82,23 +82,6 @@ export class AudioManager {
     g.linearRampToValueAtTime(target, now + seconds);
   }
 
-  // Synthesize the three voice slots in one go (slot1 first — it plays
-  // mid-reveal and matters most). Returns playable blob URLs.
-  async synthesizeAll(scripts, lang) {
-    return Promise.all(scripts.map((text) =>
-      fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, lang }),
-      })
-        .then((r) => {
-          if (!r.ok) throw new Error(`tts ${r.status}`);
-          return r.blob();
-        })
-        .then((b) => URL.createObjectURL(b)),
-    ));
-  }
-
   // Single-turn fallback: "I didn't quite catch that" as a local file, played
   // when one conversation turn's pipeline (STT/Claude/TTS) fails. Same
   // ElevenLabs voice as everything else, generated offline — so even failure
@@ -120,14 +103,22 @@ export class AudioManager {
   // Play one voice slot. Resolves when playback finishes (session.js uses
   // this to bracket the orb's speaking pulse), and resolves immediately on
   // any failure so the state machine can never hang on a missing file.
+  // She is one voice: a new line always cuts off the one still playing
+  // (threshold feedback 2026-09 — tapping ahead stacked guide lines on top
+  // of each other). _voiceSeq marks the latest call so a superseded one
+  // neither starts late (its fetch may still be in flight) nor swells the
+  // ambient back under the line that replaced it.
   async playVoice(url) {
     if (!url || !this.ctx) return;
 
+    const seq = (this._voiceSeq = (this._voiceSeq ?? 0) + 1);
+    this._cutVoice();
     this._rampAmbient(DUCKED_LEVEL, 1.0);
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const buf = await this.ctx.decodeAudioData(await res.arrayBuffer());
+      if (seq !== this._voiceSeq) return;   // replaced while loading
 
       await new Promise((resolve) => {
         const src = this.ctx.createBufferSource();
@@ -137,11 +128,29 @@ export class AudioManager {
         src.connect(g).connect(this.ctx.destination);
         src.onended = resolve;
         src.start();
+        this._voice = { src, g };
       });
     } catch (e) {
       console.warn(`audio: voice unavailable (${url}) — skipping`, e);
     } finally {
-      this._rampAmbient(AMBIENT_LEVEL, 2.0);  // bed swells back after speech
+      if (seq === this._voiceSeq) {
+        this._voice = null;
+        this._rampAmbient(AMBIENT_LEVEL, 2.0);  // bed swells back after speech
+      }
     }
+  }
+
+  // Short fade rather than a hard stop — cutting a buffer mid-waveform
+  // clicks audibly in a quiet room. stop() fires onended, which resolves the
+  // interrupted playVoice promise.
+  _cutVoice() {
+    const v = this._voice;
+    if (!v) return;
+    this._voice = null;
+    const t = this.ctx.currentTime;
+    v.g.gain.cancelScheduledValues(t);
+    v.g.gain.setValueAtTime(v.g.gain.value, t);
+    v.g.gain.linearRampToValueAtTime(0, t + 0.12);
+    v.src.stop(t + 0.12);
   }
 }

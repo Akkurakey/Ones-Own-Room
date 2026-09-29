@@ -26,7 +26,7 @@ export class SessionTimeline {
     this.elapsed = 0;
 
     this.inputs = null;
-    this.audioUrls = [];
+    this.openingReply = null; // replyQueue of the welcome, played at ignition
     this.responseReady = false;
     this.stubWait = null;     // { t, target } while simulating AI latency
     this.orbRampT = null;     // 0..1 during the fast A→B transform
@@ -75,16 +75,19 @@ export class SessionTimeline {
   // Deploying changes behaviour, not code.
   async _runPipeline(moodText) {
     try {
-      const r = await this._generate({ need: moodText, opening: true });
-      this.audioUrls = await this.audio.synthesizeAll(r.scripts, r.lang);
-      // The opening exchange seeds the in-visit memory: what they said at
-      // the door, and how she welcomed them. Pushed only once audio exists —
-      // memory must never contain words she didn't actually speak.
-      this.history.push({ user: moodText ?? "", her: r.scripts[0] });
+      const reply = this._generate({ need: moodText, opening: true });
+      // The world ignites on the FIRST spoken chunk — the rest of the welcome
+      // keeps streaming in during the ~reveal and queues behind it.
+      await reply.first;
+      this.openingReply = reply;
+      this.openingNeed = moodText ?? "";
       this.responseReady = true;   // consumed by update() — the ignition event
     } catch (e) {
       console.warn("session: AI pipeline unavailable — fallback + simulated latency", e);
-      this.audioUrls = await this.audio.synthesizeFallback();
+      const [url] = await this.audio.synthesizeFallback();
+      this.openingReply = replyQueue();
+      this.openingReply.push(url, "");
+      this.openingReply.end();
       // The stub wait ticks in update(dt) rather than setTimeout, so the
       // fake latency pauses with the headset exactly like the real session.
       this.stubWait = { t: 0, target: 3 + Math.random() * 5 };
@@ -93,27 +96,40 @@ export class SessionTimeline {
 
   // Shared request shape for opening and turns. valence/arousal/roomProfile
   // ride along as context for the persona (they drive no visuals in the demo).
-  async _generate({ need, opening }) {
-    const r = await fetch("/api/generate-script", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: this.inputs.name ?? "",
-        need,
-        valence: this.inputs.valence ?? null,
-        arousal: this.inputs.arousal ?? null,
-        roomProfile: this.inputs.roomProfile ?? "",
-        // Everything said so far this visit — she remembers within a visit,
-        // and forgets the moment they leave (history dies with the page).
-        history: this.history,
-        // Door language pins the opening only; each turn's speech carries its
-        // own language and Claude reads it from the words themselves.
-        lang: opening ? this.inputs.lang ?? "" : "",
-        opening,
-      }),
-    });
-    if (!r.ok) throw new Error(`generate-script ${r.status}`);
-    return r.json();
+  // Returns a replyQueue at once and fills it as the server streams spoken
+  // chunks (NDJSON: {lang, text, audio: base64 mp3}) — playback can start on
+  // the first chunk while later sentences are still being written.
+  _generate({ need, opening }) {
+    const reply = replyQueue();
+    (async () => {
+      const r = await fetch("/api/generate-script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: this.inputs.name ?? "",
+          need,
+          valence: this.inputs.valence ?? null,
+          arousal: this.inputs.arousal ?? null,
+          roomProfile: this.inputs.roomProfile ?? "",
+          // Everything said so far this visit — she remembers within a visit,
+          // and forgets the moment they leave (history dies with the page).
+          history: this.history,
+          // Door language pins the opening only; each turn's speech carries its
+          // own language and Claude reads it from the words themselves.
+          lang: opening ? this.inputs.lang ?? "" : "",
+          opening,
+        }),
+      });
+      if (!r.ok) throw new Error(`generate-script ${r.status}`);
+      for await (const c of ndjson(r.body)) {
+        const bytes = Uint8Array.from(atob(c.audio), (ch) => ch.charCodeAt(0));
+        reply.lang ||= c.lang;
+        reply.push(URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })), c.text);
+      }
+    })()
+      .catch((e) => console.warn("session: reply stream failed", e))
+      .finally(() => reply.end());
+    return reply;
   }
 
   // The "response ready" ignition: orb melts into glass (~2 s, driven in
@@ -126,7 +142,14 @@ export class SessionTimeline {
     this.orbRampT = 0;
     this.effects.playReveal().then(() => {
       this.state = "settled";
-      this._speak(this.audioUrls[0]);   // entry voice lands as the world finishes forming
+      // Entry voice lands as the world finishes forming. The welcome seeds
+      // the in-visit memory only after it was actually spoken — memory must
+      // never contain words she didn't say.
+      const reply = this.openingReply;
+      this._speakReply(reply).then(() => {
+        if (reply.text.trim())
+          this.history.push({ user: this.openingNeed, her: reply.text.trim(), lang: reply.lang });
+      });
     });
   }
 
@@ -156,22 +179,26 @@ export class SessionTimeline {
 
     this.orb.setWaiting(true);           // "received — thinking about it"
     let text = "";
-    let replyUrl;
+    let reply = null;
     try {
       text = await this.voice.transcribe(clip.blob);
-      const r = await this._generate({ need: text, opening: false });
-      replyUrl = (await this.audio.synthesizeAll([r.scripts[0]], r.lang))[0];
-      // Remember the exchange only once her reply is real, synthesized audio;
-      // a failed turn (oneFallback below) never enters the memory.
-      this.history.push({ user: text, her: r.scripts[0] });
+      reply = this._generate({ need: text, opening: false });
+      await reply.first;                 // she starts speaking on chunk one
     } catch (e) {
       // In-character recovery: a local pre-recorded "I didn't quite catch
       // that" — she never surfaces an error tone.
       console.warn("session: turn pipeline failed — oneFallback", e);
-      replyUrl = this.audio.oneFallback();
+      reply = null;
     }
     this.orb.setWaiting(false);
-    await this._speak(replyUrl);
+    if (reply) {
+      await this._speakReply(reply);
+      // Remember only what she actually said (a stream cut mid-reply keeps
+      // just the spoken part); a failed turn never enters the memory.
+      if (reply.text.trim()) this.history.push({ user: text, her: reply.text.trim(), lang: reply.lang });
+    } else {
+      await this._speak(this.audio.oneFallback());
+    }
 
     this._logTurn(text);
     this._turnBusy = false;
@@ -186,6 +213,23 @@ export class SessionTimeline {
     this.orb.setSpeaking(true);
     try {
       await this.audio.playVoice(url);
+    } finally {
+      this.orb.setSpeaking(false);
+      this._speaking = false;
+    }
+  }
+
+  // Play a streamed reply chunk by chunk, as one continuous utterance: the
+  // speaking pulse and the _speaking gate span the whole reply, including
+  // any short wait for the next chunk to arrive.
+  async _speakReply(reply) {
+    this._speaking = true;
+    this.orb.setSpeaking(true);
+    try {
+      for await (const url of reply) {
+        await this.audio.playVoice(url);
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      }
     } finally {
       this.orb.setSpeaking(false);
       this._speaking = false;
@@ -231,4 +275,59 @@ export class SessionTimeline {
       this._turn();
     }
   }
+}
+
+// A reply that fills while it plays: the stream pushes chunk URLs, the
+// player iterates them in order and waits when it catches up. `first`
+// settles on the first chunk (or rejects if the stream ends empty — the
+// caller's cue for its fallback); `text` accumulates what was received.
+function replyQueue() {
+  const items = [];
+  let ended = false;
+  let wake = null;
+  let firstOk, firstFail;
+  const q = {
+    text: "",
+    lang: "",
+    first: new Promise((ok, fail) => ((firstOk = ok), (firstFail = fail))),
+    push(url, text) {
+      items.push(url);
+      q.text += text;
+      firstOk();
+      wake?.();
+    },
+    end() {
+      ended = true;
+      firstFail(new Error("reply stream ended with nothing spoken"));  // no-op once resolved
+      wake?.();
+    },
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        if (items.length) yield items.shift();
+        else if (ended) return;
+        else await new Promise((r) => (wake = r));
+      }
+    },
+  };
+  q.first.catch(() => {});   // observed by callers that care; never unhandled
+  return q;
+}
+
+// Newline-delimited JSON from a fetch body, one parsed object per line.
+async function* ndjson(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) buf += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (line) yield JSON.parse(line);
+    }
+    if (done) break;
+  }
+  if (buf.trim()) yield JSON.parse(buf);
 }
